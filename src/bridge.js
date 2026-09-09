@@ -2,8 +2,8 @@
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.0";
-  const WATERMARK_ID = "__bilibili_thread_ripper_watermark__";
+  const VERSION = "0.9.1.1";
+  const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
   const ONBOARDING_ID = "__bilibili_thread_ripper_onboarding__";
@@ -23,12 +23,13 @@
     mode: 0,
     color: "#FFFFFF"
   });
-  const DEFAULTS = { enabled: true, concurrency: 32, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", subtitleLanguage: "off", subtitleLastLanguage: "" };
+  const DEFAULTS = { enabled: true, concurrency: 32, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: true, debugCategories: {}, subtitleLanguage: "off", subtitleLastLanguage: "" };
   let latestSettings = { ...DEFAULTS };
   let latestStats = null;
   let loaded = false;
   let lastBadge = null;
   let onboardingChecked = false;
+  let errorNoticeMotion = null;
 
   function removeOnboarding() {
     document.getElementById(ONBOARDING_ID)?.remove();
@@ -227,7 +228,7 @@
           }
           loaded = true;
           postSettings();
-          syncWatermark();
+          notices?.configure(latestSettings);
           updateBadge();
           removeOnboarding();
         });
@@ -283,6 +284,9 @@
       danmaku: normalizeDanmaku(input?.danmaku, input?.danmakuFontSize),
       mode: input?.mode === "overseas" ? "overseas" : "mainland",
       compatibilityMode: ["a", "b"].includes(input?.compatibilityMode) ? input.compatibilityMode : "off",
+      debugNotices: input?.debugNotices === true,
+      errorNotices: input?.errorNotices !== false,
+      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false])),
       subtitleLanguage: /^[\w-]+$/i.test(String(input?.subtitleLanguage || "off"))
         ? String(input.subtitleLanguage).slice(0, 48)
         : "off",
@@ -307,47 +311,11 @@
     } catch (_error) {}
   }
 
-  function syncWatermark() {
-    const existing = document.getElementById(WATERMARK_ID);
-    if (!loaded || latestSettings.enabled === false) {
-      existing?.remove();
-      return;
-    }
-    if (existing) {
-      existing.dataset.mode = latestSettings.mode;
-      return;
-    }
-    const mount = document.body || document.documentElement;
-    if (!mount) {
-      document.addEventListener("DOMContentLoaded", syncWatermark, { once: true });
-      return;
-    }
-    const watermark = document.createElement("div");
-    watermark.id = WATERMARK_ID;
-    watermark.textContent = "本网站由Bilibili线程撕裂者加速";
-    watermark.dataset.version = VERSION;
-    watermark.dataset.mode = latestSettings.mode;
-    for (const [property, value] of Object.entries({
-      position: "fixed",
-      right: "12px",
-      bottom: "10px",
-      color: "#ffffff",
-      opacity: "0.10",
-      font: '500 11px/1.4 "Microsoft YaHei", sans-serif',
-      "letter-spacing": "0.2px",
-      "pointer-events": "none",
-      "user-select": "none",
-      "white-space": "nowrap",
-      "z-index": "2147483647"
-    })) watermark.style.setProperty(property, value, "important");
-    mount.append(watermark);
-  }
-
   function normalizeTakeoverError(input) {
     if (!input || typeof input !== "object") return null;
     const at = Math.max(0, Number(input.at) || 0);
     const retryCount = Math.max(0, Math.min(999, Math.trunc(Number(input.retryCount) || 0)));
-    const message = String(input.message || "接管失败").slice(0, 500);
+    const message = String(input.message || "接管失败").replace(/[\u00b7\u2022\u2027\u2219\u22c5]+/g, "，").slice(0, 500);
     return {
       id: String(input.id || `${at}:${message}`).slice(0, 160),
       at,
@@ -359,8 +327,22 @@
   }
 
   function removeTakeoverErrorNotice() {
-    document.getElementById(ERROR_NOTICE_ID)?.remove();
-    document.getElementById(ERROR_NOTICE_STYLE_ID)?.remove();
+    const notice = document.getElementById(ERROR_NOTICE_ID);
+    if (!notice) { document.getElementById(ERROR_NOTICE_STYLE_ID)?.remove(); return; }
+    if (notice.dataset.leaving === "true") return;
+    const finish = () => {
+      notice.remove();
+      document.getElementById(ERROR_NOTICE_STYLE_ID)?.remove();
+      errorNoticeMotion = null;
+    };
+    const opacity = getComputedStyle(notice).opacity;
+    const transform = getComputedStyle(notice).transform;
+    errorNoticeMotion?.cancel();
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || latestSettings.enabled === false) { finish(); return; }
+    notice.dataset.leaving = "true";
+    notice.style.setProperty("pointer-events", "none", "important");
+    errorNoticeMotion = notice.animate([{ opacity, transform }, { opacity: 0, transform: "translateX(-28px)" }], { duration: 480, easing: "ease-in", fill: "forwards" });
+    errorNoticeMotion.finished.then(finish, () => {});
   }
 
   function formatErrorTime(timestamp) {
@@ -374,7 +356,7 @@
 
   function syncTakeoverErrorNotice() {
     const error = latestStats?.takeoverError;
-    if (!loaded || latestSettings.enabled === false || !error || ["ready", "disabled"].includes(latestStats?.playerState)) {
+    if (!loaded || latestSettings.enabled === false || latestSettings.errorNotices === false || !error || ["ready", "disabled"].includes(latestStats?.playerState)) {
       removeTakeoverErrorNotice();
       return;
     }
@@ -389,20 +371,20 @@
       const style = document.createElement("style");
       style.id = ERROR_NOTICE_STYLE_ID;
       style.textContent = `
-        #${ERROR_NOTICE_ID}{position:fixed!important;left:20px!important;bottom:20px!important;z-index:2147483646!important;width:min(360px,calc(100vw - 40px))!important;box-sizing:border-box!important;border:1px solid #35373c!important;border-left:4px solid #fb7299!important;border-radius:6px!important;background:#18191c!important;color:#f1f2f3!important;font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif!important;box-shadow:none!important}
+        #${ERROR_NOTICE_ID}{position:fixed!important;left:14px!important;bottom:14px!important;z-index:2147483646!important;width:min(280px,calc(100vw - 28px))!important;max-height:65vh!important;overflow:auto!important;box-sizing:border-box!important;border:1px solid #a44949!important;border-radius:5px!important;background:rgba(8,8,10,.78)!important;color:#f2f2ee!important;font-family:Tahoma,"Microsoft YaHei",sans-serif!important;text-shadow:1px 1px 0 #0009!important;box-shadow:inset 0 1px 0 #ffffff12,1px 1px 2px #0007!important}
         #${ERROR_NOTICE_ID} *{box-sizing:border-box!important}
-        #${ERROR_NOTICE_ID} .btr-error-summary{padding:13px 15px 12px!important}
-        #${ERROR_NOTICE_ID} .btr-error-title{margin:0!important;color:#f1f2f3!important;font-size:14px!important;font-weight:600!important;line-height:20px!important}
-        #${ERROR_NOTICE_ID} .btr-error-toggle{display:inline-block!important;margin:3px 0 0!important;padding:0!important;border:0!important;background:transparent!important;color:#fb7299!important;font:400 12px/18px "Microsoft YaHei","PingFang SC",Arial,sans-serif!important;text-align:left!important;cursor:pointer!important}
+        #${ERROR_NOTICE_ID} .btr-error-summary{padding:7px 9px!important}
+        #${ERROR_NOTICE_ID} .btr-error-title{margin:0!important;color:#f28b85!important;font-size:13px!important;font-weight:700!important;line-height:18px!important}
+        #${ERROR_NOTICE_ID} .btr-error-description{margin:3px 0 0!important;font-size:13px!important;line-height:18px!important;font-weight:700!important}
+        #${ERROR_NOTICE_ID} .btr-error-toggle{display:inline-block!important;margin:3px 0 0!important;padding:0!important;border:0!important;background:transparent!important;color:#f28b85!important;font:400 12px/18px Tahoma,"Microsoft YaHei",sans-serif!important;text-align:left!important;cursor:pointer!important}
         #${ERROR_NOTICE_ID} .btr-error-toggle:hover{text-decoration:underline!important}
         #${ERROR_NOTICE_ID} .btr-error-toggle:focus-visible,#${ERROR_NOTICE_ID} .btr-error-retry:focus-visible{outline:2px solid #00aeec!important;outline-offset:2px!important}
         #${ERROR_NOTICE_ID} .btr-error-details{display:none!important;padding:0 15px 14px!important;border-top:1px solid #2f3136!important}
         #${ERROR_NOTICE_ID}[data-expanded="true"] .btr-error-details{display:block!important}
         #${ERROR_NOTICE_ID} .btr-error-log{margin:11px 0 12px!important;padding:10px!important;border:0!important;border-radius:4px!important;background:#222328!important;color:#c9ccd0!important;font:12px/1.6 Consolas,"Microsoft YaHei",monospace!important;white-space:pre-wrap!important;overflow-wrap:anywhere!important;user-select:text!important}
-        #${ERROR_NOTICE_ID} .btr-error-retry{height:30px!important;margin:0!important;padding:0 13px!important;border:0!important;border-radius:4px!important;background:#fb7299!important;color:#fff!important;font:600 12px/30px "Microsoft YaHei","PingFang SC",Arial,sans-serif!important;cursor:pointer!important}
-        #${ERROR_NOTICE_ID} .btr-error-retry:hover{background:#fc8bab!important}
+        #${ERROR_NOTICE_ID} .btr-error-retry{height:30px!important;margin:0!important;padding:0 13px!important;border:1px solid #a44949!important;border-radius:3px!important;background:#713b3b!important;color:#fff!important;font:700 12px/28px Tahoma,"Microsoft YaHei",sans-serif!important;cursor:pointer!important}
+        #${ERROR_NOTICE_ID} .btr-error-retry:hover{background:#8a4545!important}
         #${ERROR_NOTICE_ID} .btr-error-retry:disabled{background:#6b4b55!important;color:#d8c5cb!important;cursor:default!important}
-        @media(max-width:520px){#${ERROR_NOTICE_ID}{left:12px!important;bottom:12px!important;width:calc(100vw - 24px)!important}}
       `;
       (document.head || document.documentElement).append(style);
     }
@@ -420,13 +402,16 @@
       summary.className = "btr-error-summary";
       const title = document.createElement("p");
       title.className = "btr-error-title";
-      title.textContent = "Bilibili 线程撕裂者错误";
+      title.textContent = "BTR 提示";
+      const description = document.createElement("p");
+      description.className = "btr-error-description";
+      description.textContent = "没能接管这个视频。";
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "btr-error-toggle";
       toggle.textContent = "检查错误日志";
       toggle.setAttribute("aria-expanded", "false");
-      summary.append(title, toggle);
+      summary.append(title, description, toggle);
 
       const details = document.createElement("div");
       details.className = "btr-error-details";
@@ -455,8 +440,15 @@
         }, 1800);
       });
       mount.append(notice);
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) errorNoticeMotion = notice.animate([{ opacity: 0, transform: "translateX(-32px)" }, { opacity: 1, transform: "translateX(0)" }], { duration: 600, easing: "cubic-bezier(.2,.75,.25,1)" });
     }
 
+    if (notice.dataset.leaving === "true") {
+      errorNoticeMotion?.cancel();
+      errorNoticeMotion = null;
+      delete notice.dataset.leaving;
+      notice.style.removeProperty("pointer-events");
+    }
     notice.dataset.errorId = error.id;
     const log = notice.querySelector(".btr-error-log");
     if (log) {
@@ -477,10 +469,14 @@
       migrated.danmaku = { ...DEFAULT_DANMAKU, fontSize: stored.danmakuFontSize };
     }
     latestSettings = normalizeStoredSettings(migrated);
-    if (stored.mode !== latestSettings.mode || stored.compatibilityMode !== latestSettings.compatibilityMode || stored.concurrency !== latestSettings.concurrency || stored.volume !== latestSettings.volume || stored.subtitleLanguage !== latestSettings.subtitleLanguage || stored.subtitleLastLanguage !== latestSettings.subtitleLastLanguage || JSON.stringify(stored.danmaku) !== JSON.stringify(latestSettings.danmaku)) {
+    if (Object.prototype.hasOwnProperty.call(stored, "statusNotice")) chrome.storage.sync.remove("statusNotice");
+    if (JSON.stringify(stored.debugCategories) !== JSON.stringify(latestSettings.debugCategories) || stored.errorNotices !== latestSettings.errorNotices || stored.debugNotices !== latestSettings.debugNotices || stored.mode !== latestSettings.mode || stored.compatibilityMode !== latestSettings.compatibilityMode || stored.concurrency !== latestSettings.concurrency || stored.volume !== latestSettings.volume || stored.subtitleLanguage !== latestSettings.subtitleLanguage || stored.subtitleLastLanguage !== latestSettings.subtitleLastLanguage || JSON.stringify(stored.danmaku) !== JSON.stringify(latestSettings.danmaku)) {
       chrome.storage.sync.set({
         mode: latestSettings.mode,
         compatibilityMode: latestSettings.compatibilityMode,
+        debugNotices: latestSettings.debugNotices,
+        errorNotices: latestSettings.errorNotices,
+        debugCategories: latestSettings.debugCategories,
         concurrency: latestSettings.concurrency,
         volume: latestSettings.volume,
         subtitleLanguage: latestSettings.subtitleLanguage,
@@ -489,7 +485,7 @@
       });
     }
     loaded = true;
-    syncWatermark();
+    notices?.configure(latestSettings);
     syncTakeoverErrorNotice();
     updateBadge();
     postSettings();
@@ -503,7 +499,7 @@
     }
     latestSettings = normalizeStoredSettings(latestSettings);
     loaded = true;
-    syncWatermark();
+    notices?.configure(latestSettings);
     syncTakeoverErrorNotice();
     updateBadge();
     postSettings();
@@ -511,6 +507,14 @@
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.data?.channel !== CHANNEL) return;
+    if (event.data.type === "playback-notice") {
+      notices?.playback(event.data.payload);
+      return;
+    }
+    if (event.data.type === "debug-notices") {
+      notices?.logs(event.data.payload);
+      return;
+    }
     if (event.data.type === "danmaku-request") {
       const requestId = String(event.data.requestId || "").slice(0, 100);
       const cid = Number(event.data.cid);
@@ -577,7 +581,7 @@
       healthyCdns: Math.max(0, Number(input.healthyCdns) || 0),
       blockedCdns: Math.max(0, Number(input.blockedCdns) || 0),
       lastHost: String(input.lastHost || "").slice(0, 120),
-      lastError: String(input.lastError || "").slice(0, 180),
+      lastError: String(input.lastError || "").replace(/[\u00b7\u2022\u2027\u2219\u22c5]+/g, "，").slice(0, 180),
       takeoverError: normalizeTakeoverError(input.takeoverError),
       cdnHosts: Array.isArray(input.cdnHosts) ? input.cdnHosts.slice(0, 32).map((item) => ({
         host: String(item?.host || "").slice(0, 120),

@@ -61,7 +61,7 @@
     const reloadState = JSON.parse(sessionStorage.getItem("__btrCompatibilityReloadV1") || "null");
     const totalCreateCalls = Number(sessionStorage.getItem(`${prefix}:creates`) || 0);
     const output = { mode, loadCount, createCalls, totalCreateCalls, playerState: stats.playerState || "", reloadState, version: stats.version || "" };
-    output.pass = output.version === "0.9.1.0"
+    output.pass = output.version === "0.9.1.1"
       && output.loadCount === 2
       && output.createCalls === 1
       && output.totalCreateCalls === 1
@@ -72,5 +72,5 @@
     result.textContent = JSON.stringify(output);
     result.dataset.pass = String(output.pass);
   }, 50);
-  setTimeout(() => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", compatibilityMode: mode, concurrency: 32 } }, "*"), 0);
+  document.addEventListener("DOMContentLoaded", () => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", compatibilityMode: mode, concurrency: 32 } }, "*"), { once: true });
 })(globalThis);

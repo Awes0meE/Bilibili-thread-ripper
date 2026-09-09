@@ -12,7 +12,7 @@
     channel: CHANNEL,
     type: "stats",
     payload: {
-      version: "0.9.1.0",
+      version: "0.9.1.1",
       playerState: "error",
       takeoverError: { id: 1, at: Date.now(), route: "bv1errorroute:p1", stage: "playinfo", message: "读取视频信息失败（HTTP 404）", retryCount: 2 }
     }
@@ -23,8 +23,8 @@
   notice?.querySelector(".btr-error-retry")?.click();
   await wait(50);
   const logText = notice?.querySelector(".btr-error-log")?.textContent || "";
-  root.postMessage({ channel: CHANNEL, type: "stats", payload: { version: "0.9.1.0", playerState: "ready", takeoverError: null } }, "*");
-  await wait(50);
+  root.postMessage({ channel: CHANNEL, type: "stats", payload: { version: "0.9.1.1", playerState: "ready", takeoverError: null } }, "*");
+  await wait(650);
   const output = {
     title: notice?.querySelector(".btr-error-title")?.textContent || "",
     expanded: notice?.dataset.expanded || "",
@@ -32,7 +32,7 @@
     retryObserved,
     removedWhenReady: !document.getElementById("__bilibili_thread_ripper_error_notice__")
   };
-  output.pass = output.title === "Bilibili 线程撕裂者错误"
+  output.pass = output.title === "BTR 提示"
     && output.expanded === "true"
     && /HTTP 404/.test(output.logText)
     && /playinfo/.test(output.logText)

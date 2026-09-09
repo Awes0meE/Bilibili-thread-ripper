@@ -42,23 +42,28 @@
         </div>
       </section>
 
+      <section class="notice-controls" aria-label="提示设置">
+        <div class="notice-row"><label for="error-notices">显示错误</label><label class="switch"><input id="error-notices" type="checkbox" aria-label="显示错误"><span></span></label></div>
+        <div class="notice-row"><label for="debug-notices">Debug 模式</label><label class="switch"><input id="debug-notices" type="checkbox" aria-label="Debug 模式"><span></span></label></div>
+        <fieldset id="debug-filters" class="debug-filters" hidden>
+          <legend>显示哪些 Debug 消息</legend>
+          <div class="debug-filter-actions"><button id="debug-select-all" type="button">全选</button><button id="debug-select-none" type="button">全不选</button></div>
+          <div class="debug-filter-options">
+            <label><input type="checkbox" data-debug-category="takeover">接管与切换</label>
+            <label><input type="checkbox" data-debug-category="playback">播放与暂停</label>
+            <label><input type="checkbox" data-debug-category="download">下载线程</label>
+            <label><input type="checkbox" data-debug-category="buffer">缓冲与跳转</label>
+            <label><input type="checkbox" data-debug-category="settings">设置变化</label>
+            <label><input type="checkbox" data-debug-category="other">其他日志</label>
+          </div>
+        </fieldset>
+      </section>
+
       <section class="current-threads" aria-live="polite">
         <span>目前总线程</span>
         <b id="active-count">0</b>
       </section>
 
-      <section class="monitor" aria-live="polite">
-        <div class="player-state">
-          <span id="player-state">等待视频</span>
-          <b id="quality"></b>
-        </div>
-        <div class="speed-summary">
-          <span>总速度</span>
-          <b id="total-speed">0 B/s</b>
-        </div>
-        <div id="thread-list" class="thread-list"><p class="empty">暂无线程</p></div>
-        <p id="last-error" class="last-error" hidden></p>
-      </section>
     </main>
     <script src="popup.js"></script>
   </body>

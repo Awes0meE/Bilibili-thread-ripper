@@ -142,7 +142,7 @@
       && output.activePodKey === NEW_BVID
       && output.resolvedIdentity?.bvid === NEW_BVID
       && output.resolvedIdentity?.cid === 303
-      && output.debugVersion === "0.9.1.0"
+      && output.debugVersion === "0.9.1.1"
       && output.settingsPanelCount === 1
       && output.settingsStrategy === "native-ui-progressive-mse-0.8-core"
       && output.compatibilityOptions.join(",") === "off,a,b"
@@ -150,9 +150,9 @@
     result.textContent = JSON.stringify(output);
     result.dataset.pass = String(output.pass);
   }, 50);
-  setTimeout(() => {
+  document.addEventListener("DOMContentLoaded", () => {
     root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*");
-  }, 0);
+  }, { once: true });
   const switchTimer = setInterval(() => {
     if (!calls.some((item) => item.marker === OLD_BVID)) return;
     clearInterval(switchTimer);

@@ -119,7 +119,8 @@
     result.dataset.pass = String(output.pass);
   }, 50);
 
-  setTimeout(() => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*"), 0);
+  // The page-hook script follows this fixture in HTML; wait for its listener.
+  document.addEventListener("DOMContentLoaded", () => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*"), { once: true });
   const switchTimer = setInterval(() => {
     if (!calls.some((item) => item.route.endsWith(":p1"))) return;
     clearInterval(switchTimer);

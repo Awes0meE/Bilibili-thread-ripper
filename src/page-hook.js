@@ -8,6 +8,8 @@
   const COMPATIBILITY_DOCUMENT_ID = root.crypto?.randomUUID?.()
     || `${Number(root.performance?.timeOrigin || Date.now()).toString(36)}-${Number(root.performance?.now?.() || 0).toString(36)}-${Math.random().toString(36).slice(2)}`;
   const THREAD_OPTIONS = Object.freeze([4, 8, 16, 32, 64, 128]);
+  const STATE_LABELS = Object.freeze({ waiting: "正在等视频信息", loading: "正在准备播放", ready: "视频已经准备好了", buffering: "正在补充缓冲", ended: "视频播放完了", error: "播放器出错了", "native-fallback": "已经改回 B 站原来的连接", disabled: "加速已关闭" });
+  const KIND_LABELS = Object.freeze({ video: "画面", audio: "声音", meta: "视频信息" });
   const SETTINGS_ID = "__bilibili_thread_ripper_native_settings__";
   const SETTINGS_STYLE_ID = "__bilibili_thread_ripper_native_settings_style__";
   if (root[INSTALL_FLAG]) return;
@@ -15,6 +17,7 @@
   const core = root.__BILI_RANGE_CORE__;
   const playerFactory = root.__BILI_NATIVE_MSE_PLAYER_FACTORY__;
   const earlyMask = root.__BILI_THREAD_RIPPER_EARLY_MASK__;
+  const notices = root.__BTR_RUNTIME_NOTICES__;
   if (!core || !playerFactory || typeof root.fetch !== "function") return;
   Object.defineProperty(root, INSTALL_FLAG, { value: true });
 
@@ -45,7 +48,7 @@
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.0",
+    version: "0.9.1.1",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -75,6 +78,8 @@
 
   function recordTakeoverFailure(route, stage, error, fatal = false) {
     const message = String(error?.message || error || "未知接管错误").slice(0, 180);
+    const stageLabel = { playinfo: "读取视频信息", mse: "播放视频", create: "启动播放器", "playinfo-update": "更新播放信息" }[stage] || "接管视频";
+    notices?.log("没能接管这个视频", `${stageLabel}时出了问题。\n${message}`, "error", "", route, "takeover");
     const now = Date.now();
     if (takeoverFailureRoute !== route) {
       takeoverFailureRoute = route;
@@ -187,6 +192,7 @@
     const ticket = ++compatibilityReloadTicket;
     const navigationGeneration = routeGeneration;
     const delay = reason === "preflight" ? 50 : Math.min(5000, 350 * (2 ** Math.min(4, Math.max(0, failures - 1))));
+    notices?.log("兼容模式准备刷新网页", `已开启兼容模式 ${compatibilityMode.toUpperCase()}。${reason === "preflight" ? "播放前会先刷新一次。" : "这次加载失败了，准备刷新后重试。"}\n大约 ${(delay / 1000).toFixed(1)} 秒后刷新。`, "info", "", route, "settings");
     compatibilityReloadTimer = setTimeout(() => {
       if (ticket !== compatibilityReloadTicket) return;
       if (navigationGeneration !== routeGeneration || routeIdentity()?.key !== route) {
@@ -322,6 +328,7 @@
       const now = Date.now();
       let host = "";
       try { host = new URL(event.url).hostname; } catch (_error) {}
+      if (settings.debugNotices && settings.debugCategories?.download !== false) notices?.log("开始下载一小段数据", `第 ${id} 条线程正在下载${KIND_LABELS[event.kind] || "画面"}。\n下载节点：${host}`, "info", `range-start-${event.kind}`, undefined, "download");
       transfers.set(id, {
         id,
         kind: ["video", "audio", "meta"].includes(event.kind) ? event.kind : "video",
@@ -344,6 +351,11 @@
     const item = transfers.get(Number(event?.id));
     if (!item || item.state !== "active") return event?.id;
     const now = Date.now();
+    if ((settings.debugNotices && settings.debugCategories?.download !== false) || (settings.errorNotices !== false && event.phase === "error")) {
+      const transferLabel = { progress: "正在接收视频数据", done: "这一小段下载好了", cancel: "这次下载已取消", error: "这一小段没能下载下来" }[event.phase] || "下载状态发生变化";
+      const detail = `第 ${item.id} 条线程已收到 ${Math.round((item.loaded + (Number(event.bytes) || 0)) / 1024)} KiB ${KIND_LABELS[item.kind] || "视频"}数据。\n下载节点：${item.host}${event.error ? `\n原因：${event.error.message || event.error}` : ""}`;
+      notices?.log(transferLabel, detail, event.phase === "error" ? "error" : event.phase === "done" ? "success" : "info", `range-${event.phase}-${item.kind}`, undefined, "download");
+    }
     if (event.phase === "progress") {
       const bytes = Math.max(0, Number(event.bytes) || 0);
       item.loaded += bytes;
@@ -586,6 +598,7 @@
   }
 
   async function fetchRoutePlayinfo(identity, signal) {
+    notices?.log("正在读取视频信息", "确认你要看的视频和分 P。", "info", "", identity.key, "takeover");
     const query = identity.bvid
       ? `bvid=${encodeURIComponent(identity.bvid)}`
       : `aid=${encodeURIComponent(identity.aid)}`;
@@ -613,6 +626,7 @@
     if (Number(playinfo?.code) !== 0 || !isDashPlayinfo(playinfo)) throw new Error(playinfo?.message || "新视频没有 DASH 播放清单");
     if (signal?.aborted) throw signal.reason || new DOMException("播放清单请求已取消", "AbortError");
     cachePlayinfo(identity, playinfo, cid);
+    notices?.log("已经拿到视频下载地址", "接下来开始准备多线程下载。", "success", "", identity.key, "takeover");
     return playinfo;
   }
 
@@ -734,6 +748,7 @@
 
   function stopPlayer(resumeNative = true) {
     const current = player;
+    notices?.detach(resumeNative ? "已停止加速，交回 B 站原来的连接" : "已停止接管上一个视频");
     playerLifecycle += 1;
     player = null;
     playerRoute = "";
@@ -849,6 +864,7 @@
     }
     const generation = routeGeneration;
     let playinfo = currentPlayinfo(identity);
+    notices?.log("准备接管这个视频", playinfo ? "已经有下载地址，可以继续准备播放。" : "还没有下载地址，正在向 B 站请求。", "info", "", route, "takeover");
     if (!playinfo) {
       startingRoute = route;
       routeRequestController?.abort();
@@ -891,16 +907,22 @@
         nativeFetch,
         poster: String(root.__INITIAL_STATE__?.videoData?.pic || ""),
         onTransfer,
+        onLog(title, detail, level = "info", category = "other") {
+          if (lifecycle !== playerLifecycle) return;
+          notices?.log(title, detail, level, "", route, category);
+        },
         onSettingsChange(next) {
           if (lifecycle !== playerLifecycle) return;
           root.postMessage({ channel: CHANNEL, type: "settings-update", payload: next }, "*");
         },
         onNativeSourceChange() {
           if (lifecycle !== playerLifecycle) return;
+          notices?.detach("B 站正在切换视频，准备重新接管");
           handleNativeSourceChange(route, lifecycle);
         },
         onSegment(event) {
           if (lifecycle !== playerLifecycle) return;
+          notices?.log("下载好的数据已经交给播放器", `这段${KIND_LABELS[event.kind] || "视频"}数据有 ${Math.round(event.bytes / 1024)} KiB，由 ${event.pieces} 路下载完成。`, "success", `segment-${event.kind}`, route, "buffer");
           if (takeoverFailureRoute === route || stats.takeoverError?.route === route) {
             clearTakeoverFailure();
             stats.lastError = "";
@@ -913,6 +935,7 @@
         },
         onState(next) {
           if (lifecycle !== playerLifecycle) return;
+          if (next.playerState !== stats.playerState || next.quality !== stats.quality) notices?.log(STATE_LABELS[next.playerState] || "播放状态发生变化", `当前清晰度是 ${next.quality || "默认清晰度"}，已经缓冲 ${(Number(next.bufferedAhead) || 0).toFixed(1)} 秒。`, next.playerState === "error" ? "error" : ["ready", "ended"].includes(next.playerState) ? "success" : "info", "", route, "playback");
           stats.mode = next.mode || settings.mode;
           stats.playerState = next.playerState || stats.playerState;
           if (next.playerState === "ready" && (takeoverFailureRoute === route || stats.takeoverError?.route === route)) {
@@ -956,6 +979,7 @@
       player = nextPlayer;
       playerRoute = route;
       playerContainer = container;
+      notices?.attach(nextPlayer.video, route, lifecycle, () => lifecycle === playerLifecycle && player === nextPlayer && playerRoute === routeIdentity()?.key && playerContainer?.isConnected && !["error", "native-fallback", "disabled"].includes(stats.playerState));
       if (isPodSwitch) {
         trustedPodVideoKey = identity.videoKey;
         pendingPodSwitch = null;
@@ -995,6 +1019,8 @@
       const hadLoadedSettings = settingsLoaded;
       settings = core.normalizeSettings(event.data.payload);
       settingsLoaded = true;
+      notices?.configure(settings);
+      if (!hadLoadedSettings || previous.enabled !== settings.enabled || previous.mode !== settings.mode || previous.concurrency !== settings.concurrency || previous.compatibilityMode !== settings.compatibilityMode) notices?.log("设置已经生效", `使用${settings.mode === "overseas" ? "海外" : "大陆"} CDN，开启 ${settings.concurrency} 条下载线程。\n当前是${settings.compatibilityMode === "off" ? "标准模式" : `兼容模式 ${settings.compatibilityMode.toUpperCase()}`}。`, "success", "", undefined, "settings");
       stats.mode = settings.mode;
       syncSettingsMenu();
       if (settings.compatibilityMode === "off") {
@@ -1073,7 +1099,7 @@
       getSettings: () => ({ ...settings }),
       getStats: () => ({ ...stats, takeoverError: stats.takeoverError ? { ...stats.takeoverError } : null, threadSpeeds: stats.threadSpeeds.map((item) => ({ ...item })) }),
       restart: () => restartPlayer(true),
-      version: "0.9.1.0"
+      version: "0.9.1.1"
     })
   });
   publish();

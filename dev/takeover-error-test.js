@@ -31,7 +31,7 @@
       takeoverError: stats.takeoverError || null,
       requests
     };
-    output.pass = output.version === "0.9.1.0"
+    output.pass = output.version === "0.9.1.1"
       && output.playerState === "error"
       && output.takeoverError?.stage === "playinfo"
       && /HTTP 404/.test(output.takeoverError?.message || "")
@@ -40,5 +40,7 @@
     result.textContent = JSON.stringify(output);
     result.dataset.pass = String(output.pass);
   });
-  setTimeout(() => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*"), 0);
+  // The fixture loads before page-hook.js. A zero-delay timer can fire while
+  // that external script is still loading and lose the only settings message.
+  document.addEventListener("DOMContentLoaded", () => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*"), { once: true });
 })(globalThis);

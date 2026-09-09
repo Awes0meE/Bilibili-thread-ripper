@@ -269,6 +269,7 @@
       if (!sessionIsCurrent(candidate)) throw new DOMException("播放任务已取消", "AbortError");
       const sidx = sidxTools.parseSidx(indexBytes.bytes, ranges.index.start);
       if (!sidx?.segments?.length) throw new Error(`${kind === "video" ? "视频" : "音频"} SIDX 解析失败`);
+      options.onLog?.("已经确认数据的下载位置", `找到了 ${sidx.segments.length} 段${kind === "audio" ? "声音" : "画面"}数据。`, "success", "download");
       const startupIndex = sidxTools.segmentIndexAt(sidx.segments, startTime);
       const track = {
         kind, representation, resolver, sourceBuffer, sidx,
@@ -453,6 +454,7 @@
       const remaining = Math.max(0.5, (Number(candidate.mediaSource.duration) || target + required) - target);
       if (Math.min(...ends) - target < Math.max(0.5, Math.min(required, remaining))) return;
       candidate.playbackActivated = true;
+      options.onLog?.("开播需要的缓冲已经够了", `从 ${target.toFixed(2)} 秒开始播放，这次需要先缓冲 ${required.toFixed(1)} 秒。`, "success", "buffer");
       candidate.playbackActivatedAt = performance.now();
       if (target - (Number(video.currentTime) || 0) > 0.05) setCurrentTimeInternal(candidate, target);
       video.volume = candidate.volume;
@@ -473,6 +475,7 @@
         const remaining = Math.max(0.5, (Number(candidate.mediaSource.duration) || current + candidate.recoveryTargetSeconds) - current);
         if (ahead >= Math.min(candidate.recoveryTargetSeconds, remaining)) {
           candidate.recovering = false;
+          options.onLog?.("缓冲补好了，可以继续播放", `已经备好接下来 ${ahead.toFixed(1)} 秒的数据。`, "success", "buffer");
           candidate.playAttempted = false;
           attemptAutoplay(candidate);
         }
@@ -512,6 +515,7 @@
 
     async function startSession(representation, playbackState) {
       if (destroyed) return;
+      options.onLog?.("正在准备播放器", `使用 ${qualityLabel(representation)} 清晰度，从 ${Number(playbackState.time || 0).toFixed(2)} 秒开始。`, "info", "takeover");
       const previous = session;
       selectedVideo = representation;
       const mediaSource = new MediaSource();
@@ -581,10 +585,12 @@
         return;
       }
       if (candidate.tracks.every((track) => isBufferedAt(track.sourceBuffer, target))) {
+        options.onLog?.("你跳到的位置已经有缓冲", `可以直接从 ${target.toFixed(2)} 秒继续播放。`, "success", "buffer");
         ensureBuffer(candidate);
         return;
       }
       seekReloads += 1;
+      options.onLog?.("你跳到的位置还需要加载", `正在为 ${target.toFixed(2)} 秒的位置重新准备数据。`, "info", "buffer");
       await startSession(selectedVideo, {
         time: target,
         resume: !video.paused,
@@ -701,7 +707,7 @@
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.0",
+        version: "0.9.1.1",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,

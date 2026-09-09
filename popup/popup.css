@@ -92,7 +92,7 @@ header {
 
 h1 { margin: 0; font-size: 17px; letter-spacing: 0.2px; }
 .switch { position: relative; width: 42px; height: 24px; }
-.switch input { position: absolute; opacity: 0; }
+.switch input { position:absolute; inset:0; z-index:1; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; }
 .switch span {
   position: absolute;
   inset: 0;
@@ -114,6 +114,20 @@ h1 { margin: 0; font-size: 17px; letter-spacing: 0.2px; }
 }
 .switch input:checked + span { background: #fb7299; }
 .switch input:checked + span::after { transform: translateX(18px); }
+.switch input:focus-visible + span { outline: 2px solid #fff; outline-offset: 3px; }
+.notice-controls { margin-top:12px; padding:14px 16px; border:1px solid #30343d; border-radius:8px; background:#20232a; }
+.notice-row { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#c9ced9; font-size:13px; }
+.notice-row + .notice-row { margin-top:14px; }
+.debug-filters { min-width:0; margin:16px 0 0; padding:12px 0 0; border:0; border-top:1px solid #343943; }
+.debug-filters[hidden] { display:none; }
+.debug-filters legend { padding:0 0 4px; color:#c9ced9; font-size:12px; }
+.debug-filter-actions { display:flex; gap:8px; margin-bottom:12px; }
+.debug-filter-actions button { padding:4px 8px; border:1px solid #444b57; border-radius:4px; background:#292d35; color:#d9dee8; font:inherit; font-size:11px; cursor:pointer; }
+.debug-filter-actions button:hover { border-color:#fb7299; }
+.debug-filter-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 8px; }
+.debug-filter-options label { display:flex; align-items:center; gap:7px; color:#c9ced9; font-size:12px; cursor:pointer; }
+.debug-filter-options input { flex:none; width:15px; height:15px; margin:0; accent-color:#fb7299; cursor:pointer; }
+.debug-filter-actions button:focus-visible,.debug-filter-options input:focus-visible { outline:2px solid #fff; outline-offset:3px; }
 
 .controls {
   padding: 16px;
@@ -214,8 +228,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .scale span:first-child { text-align: left; }
 .scale span:last-child { text-align: right; }
 
-.current-threads,
-.monitor {
+.current-threads {
   margin-top: 12px;
   padding: 16px;
   border: 1px solid #30343d;
@@ -235,112 +248,4 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   color: #ffffff;
   font-size: 20px;
   font-variant-numeric: tabular-nums;
-}
-
-.monitor-title,
-.player-state,
-.speed-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.player-state {
-  color: #c9ced9;
-  font-size: 12px;
-}
-
-.player-state b { color: #fb7299; font-size: 12px; }
-
-.monitor-title {
-  color: #c9ced9;
-  font-size: 13px;
-}
-
-.speed-summary {
-  margin: 10px 0 12px;
-  padding: 9px 10px;
-  border-radius: 5px;
-  color: #8f97a7;
-  background: #181b21;
-  font-size: 11px;
-}
-
-.speed-summary b {
-  color: #ffffff;
-  font-size: 15px;
-}
-
-.thread-list {
-  display: grid;
-  gap: 7px;
-  max-height: calc(100vh - 350px);
-  min-height: 180px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-
-.thread-row {
-  display: grid;
-  grid-template-columns: 34px 31px 1fr 68px;
-  align-items: center;
-  gap: 7px;
-  min-height: 22px;
-  font-size: 10px;
-}
-
-.thread-label {
-  color: #aeb5c3;
-  font-variant-numeric: tabular-nums;
-}
-
-.thread-label.prefetch { color: #59d3ae; }
-.thread-label.audio { color: #59d3ae; }
-.thread-label.meta { color: #edb95a; }
-
-.thread-host {
-  color: #778091;
-  font-size: 9px;
-  text-align: center;
-}
-
-.speed-track {
-  height: 8px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: #3a3e47;
-}
-
-.speed-bar {
-  width: 0;
-  height: 100%;
-  border-radius: 4px;
-  background: #fb7299;
-}
-
-.thread-row.done .speed-bar { background: #596170; }
-.thread-row.error .speed-bar { background: #e15b64; }
-
-.thread-speed {
-  color: #e5e8ee;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.empty {
-  margin: 7px 0;
-  color: #747c8c;
-  font-size: 11px;
-  text-align: center;
-}
-
-.last-error {
-  margin: 10px 0 0;
-  padding: 8px;
-  border-left: 3px solid #e15b64;
-  color: #ef8b92;
-  background: #181b21;
-  font-size: 10px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
 }

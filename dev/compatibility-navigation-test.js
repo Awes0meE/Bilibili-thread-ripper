@@ -78,7 +78,7 @@
       playerState: stats.playerState || "",
       version: stats.version || ""
     };
-    output.pass = output.version === "0.9.1.0"
+    output.pass = output.version === "0.9.1.1"
       && output.loadCount === 1
       && output.failedFirstRequest
       && output.switched
@@ -90,5 +90,5 @@
     result.dataset.pass = String(output.pass);
   }, 50);
 
-  setTimeout(() => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", compatibilityMode: "a", concurrency: 32 } }, "*"), 0);
+  document.addEventListener("DOMContentLoaded", () => root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", compatibilityMode: "a", concurrency: 32 } }, "*"), { once: true });
 })(globalThis);

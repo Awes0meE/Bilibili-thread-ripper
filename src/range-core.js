@@ -104,6 +104,9 @@
       enabled: source.enabled !== false,
       mode,
       compatibilityMode,
+      debugNotices: source.debugNotices === true,
+      errorNotices: source.errorNotices !== false,
+      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, source.debugCategories?.[key] !== false])),
       concurrency: allowed.includes(requested) ? requested : 32,
       volume: Number.isFinite(requestedVolume) ? Math.max(0, Math.min(1, requestedVolume)) : 0.7,
       subtitleLanguage: /^[\w-]+$/i.test(String(source.subtitleLanguage || "off"))

@@ -5,7 +5,7 @@ const { Readable } = require("stream");
 
 const root = path.resolve(__dirname, "..");
 const port = 18763;
-const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".md": "text/plain; charset=utf-8" };
+const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".md": "text/plain; charset=utf-8" };
 const testBvid = String(process.env.BTR_TEST_BVID || "").trim();
 const testCid = Number(process.env.BTR_TEST_CID);
 
