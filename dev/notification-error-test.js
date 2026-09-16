@@ -37,12 +37,21 @@ function mockChrome() {
     await page.goto(origin + "/dev/notification-test.html");
     await popup.goto(origin + "/popup/popup.html");
     await page.waitForFunction(() => __biliThreadRipperDebug.getPlayer());
-    assert.equal(await popup.locator("#error-notices").isChecked(), true);
+    assert.equal(await popup.locator("#error-notices").isChecked(), false);
     assert.equal(await popup.locator("#debug-notices").isChecked(), false);
     assert.equal(await popup.locator("#debug-filters").isVisible(), false);
     assert.equal(await popup.locator("[data-debug-category]:checked").count(), 6);
-    assert.equal(await page.evaluate(() => __biliThreadRipperDebug.getSettings().errorNotices), true);
+    assert.equal(await popup.locator("#thread-value").textContent(), "8");
+    assert.equal(await page.evaluate(() => __biliThreadRipperDebug.getSettings().errorNotices), false);
+    assert.equal(await page.evaluate(() => __biliThreadRipperDebug.getSettings().concurrency), 8);
+    // Red errors stay hidden until the user turns the switch on.
+    await page.evaluate(() => __BTR_RUNTIME_NOTICES__.log("默认不显示的错误", "显示错误默认关闭", "error"));
+    await page.waitForTimeout(600);
     assert.equal(await page.locator(".bubble").count(), 0);
+    assert.equal(await page.evaluate(() => __noticeTest.messages.filter(item => item.type === "debug-notices").length), 0);
+    console.log("PASS 显示错误默认关闭，线程数默认 8，红色错误不显示");
+    await popup.locator("#error-notices").check();
+    await page.waitForFunction(() => __biliThreadRipperDebug.getSettings().errorNotices === true);
     await page.evaluate(() => {
       __BTR_RUNTIME_NOTICES__.log("需要保留的错误", "测试普通信息不会淹没错误。", "error");
       for (let i = 0; i < 100; i++) __BTR_RUNTIME_NOTICES__.log("普通信息 " + i, "不应在非 Debug 模式显示");
@@ -63,7 +72,7 @@ function mockChrome() {
     assert((await page.locator(red).count()) >= 1);
     assert((await page.locator(red + " .heading").allTextContents()).every(title => title === "BTR 提示"));
     assert.equal(await page.locator(".mode").count(), 0);
-    console.log("PASS 默认显示错误，Debug 关闭时仍捕获真实媒体错误与 Range 下载错误，仅显示红色");
+    console.log("PASS 打开显示错误后，Debug 关闭时仍捕获真实媒体错误与 Range 下载错误，仅显示红色");
 
     await popup.locator("#error-notices").uncheck();
     await page.waitForTimeout(800);

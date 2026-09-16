@@ -65,9 +65,27 @@ function setThreadBadge(tabId, enabled, activeThreads) {
   ]).catch((error) => console.error("无法更新线程徽标", error));
 }
 
+// 0.9.1.2 moves existing users once to mainland CDN, 8 threads and hidden error notices.
+// Other settings are kept. A fresh install already starts with these defaults.
+const SETTINGS_REVISION = 2;
+async function migrateSettings() {
+  const stored = await chrome.storage.sync.get(null);
+  if (stored.settingsRevision === SETTINGS_REVISION) return;
+  const existing = Object.keys(stored).some((key) => key !== "settingsRevision");
+  await chrome.storage.sync.set({
+    settingsRevision: SETTINGS_REVISION,
+    ...(existing ? { mode: "mainland", concurrency: 8, errorNotices: false } : {})
+  });
+}
+
+function prepareExtension() {
+  enableActionSidePanel();
+  migrateSettings().catch((error) => console.error("无法更新默认设置", error));
+}
+
 enableActionSidePanel();
-chrome.runtime.onInstalled.addListener(enableActionSidePanel);
-chrome.runtime.onStartup.addListener(enableActionSidePanel);
+chrome.runtime.onInstalled.addListener(prepareExtension);
+chrome.runtime.onStartup.addListener(prepareExtension);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "setThreadBadge") {

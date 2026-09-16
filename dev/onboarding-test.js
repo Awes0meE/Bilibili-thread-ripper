@@ -44,10 +44,10 @@
     hiddenOnSecondLoad: !repeatedPanel
   };
   result.pass = result.firstPanelVisible
-    && result.version === "0.9.1.1"
+    && result.version === "0.9.1.2"
     && result.defaultMode === "mainland"
     && result.defaultCompatibilityMode === "off"
-    && result.defaultThreadIndex === "3"
+    && result.defaultThreadIndex === "1"
     && result.savedMode === "overseas"
     && result.savedCompatibilityMode === "b"
     && result.savedConcurrency === 64

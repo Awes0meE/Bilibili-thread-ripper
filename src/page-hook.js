@@ -26,6 +26,14 @@
   let settingsLoaded = false;
   let player = null;
   let playerRoute = "";
+  // A CDN node that twice sends nothing is skipped until the page moves to another video.
+  // Restarting the takeover for the same video keeps the list.
+  let cdnBanRoute = "";
+  const cdnBans = root.__BILI_CDN_RESOLVER_FACTORY__?.createBanList({
+    onBan(host) {
+      notices?.log("已停用这个 CDN 节点", `${host} 两次没有返回任何数据，这个视频接下来不再使用它。`, "error", "", cdnBanRoute, "download");
+    }
+  }) || null;
   let playerContainer = null;
   let playerLifecycle = 0;
   let failedRoute = "";
@@ -48,7 +56,7 @@
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.1",
+    version: "0.9.1.2",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -351,7 +359,7 @@
     const item = transfers.get(Number(event?.id));
     if (!item || item.state !== "active") return event?.id;
     const now = Date.now();
-    if ((settings.debugNotices && settings.debugCategories?.download !== false) || (settings.errorNotices !== false && event.phase === "error")) {
+    if ((settings.debugNotices && settings.debugCategories?.download !== false) || (settings.errorNotices === true && event.phase === "error")) {
       const transferLabel = { progress: "正在接收视频数据", done: "这一小段下载好了", cancel: "这次下载已取消", error: "这一小段没能下载下来" }[event.phase] || "下载状态发生变化";
       const detail = `第 ${item.id} 条线程已收到 ${Math.round((item.loaded + (Number(event.bytes) || 0)) / 1024)} KiB ${KIND_LABELS[item.kind] || "视频"}数据。\n下载节点：${item.host}${event.error ? `\n原因：${event.error.message || event.error}` : ""}`;
       notices?.log(transferLabel, detail, event.phase === "error" ? "error" : event.phase === "done" ? "success" : "info", `range-${event.phase}-${item.kind}`, undefined, "download");
@@ -893,6 +901,10 @@
     publish();
     const isPodSwitch = Boolean(pendingPodSwitch && identity.key !== pendingPodSwitch.fromRoute);
     const lifecycle = ++playerLifecycle;
+    if (cdnBanRoute !== route) {
+      cdnBans?.reset();
+      cdnBanRoute = route;
+    }
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
@@ -907,6 +919,7 @@
         nativeFetch,
         poster: String(root.__INITIAL_STATE__?.videoData?.pic || ""),
         onTransfer,
+        cdnBans,
         onLog(title, detail, level = "info", category = "other") {
           if (lifecycle !== playerLifecycle) return;
           notices?.log(title, detail, level, "", route, category);
@@ -949,12 +962,12 @@
           const byHost = new Map();
           for (const item of next.cdnHosts || []) {
             const current = byHost.get(item.host);
-            if (!current || current.state === "untested" || item.state === "blocked") byHost.set(item.host, item);
+            if (!current || current.state === "untested" || ["blocked", "banned"].includes(item.state)) byHost.set(item.host, item);
           }
           stats.cdnHosts = Array.from(byHost.values()).slice(0, 32);
           stats.discoveredCdns = stats.cdnHosts.length;
           stats.healthyCdns = stats.cdnHosts.filter((item) => item.state === "healthy").length;
-          stats.blockedCdns = stats.cdnHosts.filter((item) => item.state === "blocked").length;
+          stats.blockedCdns = stats.cdnHosts.filter((item) => ["blocked", "banned"].includes(item.state)).length;
           schedulePublish();
         },
         onFatal(error) {
@@ -1099,7 +1112,7 @@
       getSettings: () => ({ ...settings }),
       getStats: () => ({ ...stats, takeoverError: stats.takeoverError ? { ...stats.takeoverError } : null, threadSpeeds: stats.threadSpeeds.map((item) => ({ ...item })) }),
       restart: () => restartPlayer(true),
-      version: "0.9.1.1"
+      version: "0.9.1.2"
     })
   });
   publish();

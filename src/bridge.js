@@ -2,7 +2,7 @@
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.1";
+  const VERSION = "0.9.1.2";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -23,7 +23,7 @@
     mode: 0,
     color: "#FFFFFF"
   });
-  const DEFAULTS = { enabled: true, concurrency: 32, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: true, debugCategories: {}, subtitleLanguage: "off", subtitleLastLanguage: "" };
+  const DEFAULTS = { enabled: true, concurrency: 8, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: false, debugCategories: {}, subtitleLanguage: "off", subtitleLastLanguage: "" };
   let latestSettings = { ...DEFAULTS };
   let latestStats = null;
   let loaded = false;
@@ -181,7 +181,7 @@
     threadRange.value = String(initialThreadIndex);
     threadRange.setAttribute("aria-label", "并发线程");
     threadRange.addEventListener("input", () => {
-      const value = THREAD_OPTIONS[Number(threadRange.value)] || 32;
+      const value = THREAD_OPTIONS[Number(threadRange.value)] || 8;
       threadValue.value = String(value);
       threadValue.textContent = String(value);
     });
@@ -196,7 +196,7 @@
 
     const tip = document.createElement("p");
     tip.className = "btr-onboarding-tip";
-    tip.textContent = "推荐先使用大陆 CDN 和 32 线程。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
+    tip.textContent = "推荐先使用大陆 CDN 和 8 线程。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
     const save = document.createElement("button");
     save.type = "button";
     save.className = "btr-onboarding-save";
@@ -208,7 +208,7 @@
       const mode = panel.querySelector('input[name="btr-onboarding-mode"]:checked')?.value === "overseas" ? "overseas" : "mainland";
       const compatibilityValue = panel.querySelector('input[name="btr-onboarding-compatibility"]:checked')?.value;
       const compatibilityMode = ["a", "b"].includes(compatibilityValue) ? compatibilityValue : "off";
-      const concurrency = THREAD_OPTIONS[Number(threadRange.value)] || 32;
+      const concurrency = THREAD_OPTIONS[Number(threadRange.value)] || 8;
       save.disabled = true;
       save.textContent = "正在保存…";
       latestSettings = normalizeStoredSettings({ ...latestSettings, enabled: true, mode, compatibilityMode, concurrency });
@@ -279,13 +279,13 @@
     const requestedVolume = Number(input?.volume);
     return {
       enabled: input?.enabled !== false,
-      concurrency: allowedThreads.includes(requested) ? requested : 32,
+      concurrency: allowedThreads.includes(requested) ? requested : 8,
       volume: Number.isFinite(requestedVolume) ? Math.max(0, Math.min(1, requestedVolume)) : 0.7,
       danmaku: normalizeDanmaku(input?.danmaku, input?.danmakuFontSize),
       mode: input?.mode === "overseas" ? "overseas" : "mainland",
       compatibilityMode: ["a", "b"].includes(input?.compatibilityMode) ? input.compatibilityMode : "off",
       debugNotices: input?.debugNotices === true,
-      errorNotices: input?.errorNotices !== false,
+      errorNotices: input?.errorNotices === true,
       debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false])),
       subtitleLanguage: /^[\w-]+$/i.test(String(input?.subtitleLanguage || "off"))
         ? String(input.subtitleLanguage).slice(0, 48)
@@ -356,7 +356,7 @@
 
   function syncTakeoverErrorNotice() {
     const error = latestStats?.takeoverError;
-    if (!loaded || latestSettings.enabled === false || latestSettings.errorNotices === false || !error || ["ready", "disabled"].includes(latestStats?.playerState)) {
+    if (!loaded || latestSettings.enabled === false || latestSettings.errorNotices !== true || !error || ["ready", "disabled"].includes(latestStats?.playerState)) {
       removeTakeoverErrorNotice();
       return;
     }
@@ -585,7 +585,7 @@
       takeoverError: normalizeTakeoverError(input.takeoverError),
       cdnHosts: Array.isArray(input.cdnHosts) ? input.cdnHosts.slice(0, 32).map((item) => ({
         host: String(item?.host || "").slice(0, 120),
-        state: ["healthy", "blocked", "untested"].includes(item?.state) ? item.state : "untested"
+        state: ["healthy", "blocked", "banned", "untested"].includes(item?.state) ? item.state : "untested"
       })) : [],
       threadSpeeds: Array.isArray(input.threadSpeeds) ? input.threadSpeeds.slice(0, 512).map((item) => ({
         id: Number(item?.id) || 0,

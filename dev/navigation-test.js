@@ -142,7 +142,7 @@
       && output.activePodKey === NEW_BVID
       && output.resolvedIdentity?.bvid === NEW_BVID
       && output.resolvedIdentity?.cid === 303
-      && output.debugVersion === "0.9.1.1"
+      && output.debugVersion === "0.9.1.2"
       && output.settingsPanelCount === 1
       && output.settingsStrategy === "native-ui-progressive-mse-0.8-core"
       && output.compatibilityOptions.join(",") === "off,a,b"

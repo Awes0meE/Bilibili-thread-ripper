@@ -31,7 +31,7 @@
       takeoverError: stats.takeoverError || null,
       requests
     };
-    output.pass = output.version === "0.9.1.1"
+    output.pass = output.version === "0.9.1.2"
       && output.playerState === "error"
       && output.takeoverError?.stage === "playinfo"
       && /HTTP 404/.test(output.takeoverError?.message || "")

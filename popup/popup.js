@@ -25,7 +25,7 @@ async function refresh() {
 
 function setSlider(threads) {
   const index = THREAD_OPTIONS.indexOf(Number(threads));
-  const safe = index < 0 ? 3 : index;
+  const safe = index < 0 ? 1 : index;
   concurrency.value = String(safe);
   threadValue.value = String(THREAD_OPTIONS[safe]);
   concurrency.setAttribute("aria-valuetext", String(THREAD_OPTIONS[safe]));
@@ -33,7 +33,7 @@ function setSlider(threads) {
 }
 
 async function init() {
-  const stored = await chrome.storage.sync.get({ enabled: true, concurrency: 32, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: true, debugCategories: {} });
+  const stored = await chrome.storage.sync.get({ enabled: true, concurrency: 8, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: false, debugCategories: {} });
   enabled.checked = stored.enabled !== false;
   debugNotices.checked = stored.debugNotices === true;
   debugFilters.hidden = !debugNotices.checked;
@@ -46,7 +46,7 @@ async function init() {
   for (const input of debugCategoryInputs) input.addEventListener("change", saveDebugCategories);
   document.getElementById("debug-select-all").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = true; saveDebugCategories(); });
   document.getElementById("debug-select-none").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = false; saveDebugCategories(); });
-  errorNotices.checked = stored.errorNotices !== false;
+  errorNotices.checked = stored.errorNotices === true;
   errorNotices.addEventListener("change", () => chrome.storage.sync.set({ errorNotices: errorNotices.checked }));
   setSlider(stored.concurrency);
   const chosen = document.querySelector(`input[name="mode"][value="${stored.mode === "overseas" ? "overseas" : "mainland"}"]`);
@@ -74,8 +74,13 @@ async function init() {
       debugFilters.hidden = !debugNotices.checked;
     }
     if (changes.debugCategories) for (const input of debugCategoryInputs) input.checked = changes.debugCategories.newValue?.[input.dataset.debugCategory] !== false;
-    if (changes.errorNotices) errorNotices.checked = changes.errorNotices.newValue !== false;
+    if (changes.errorNotices) errorNotices.checked = changes.errorNotices.newValue === true;
     if (changes.enabled) enabled.checked = changes.enabled.newValue !== false;
+    if (changes.concurrency) setSlider(changes.concurrency.newValue);
+    if (changes.mode) {
+      const radio = document.querySelector(`input[name="mode"][value="${changes.mode.newValue === "overseas" ? "overseas" : "mainland"}"]`);
+      if (radio) radio.checked = true;
+    }
     if (changes.compatibilityMode) {
       const next = ["off", "a", "b"].includes(changes.compatibilityMode.newValue) ? changes.compatibilityMode.newValue : "off";
       const radio = document.querySelector(`input[name="compatibility-mode"][value="${next}"]`);

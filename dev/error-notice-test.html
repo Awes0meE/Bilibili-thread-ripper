@@ -2,14 +2,15 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>BTR 0.9.1.1 左下错误提示测试</title>
+  <title>BTR 0.9.1.2 左下错误提示测试</title>
 </head>
 <body>
   <pre id="error-notice-result">testing</pre>
   <script>
     (() => {
       const changeListeners = [];
-      const syncState = { enabled: true, mode: "mainland", concurrency: 32 };
+      // The takeover error box only appears when “显示错误” is on (off by default since 0.9.1.2).
+      const syncState = { enabled: true, mode: "mainland", concurrency: 8, errorNotices: true };
       const localState = { btrOnboardingRevision: "native-progressive-mse-v1" };
       const area = (state, areaName) => ({
         get(defaults, callback) { callback({ ...(defaults || {}), ...state }); },

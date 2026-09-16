@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$ChromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
 )
 
@@ -9,7 +9,7 @@ $extensionRoot = [System.IO.Path]::GetFullPath((Join-Path $distRoot "extension")
 $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $distRoot "source-package"))
 $privateRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "private"))
 $keyPath = Join-Path $privateRoot "extension.pem"
-$manifest = Get-Content -LiteralPath (Join-Path $projectRoot "manifest.json") -Raw | ConvertFrom-Json
+$manifest = Get-Content -LiteralPath (Join-Path $projectRoot "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = [string]$manifest.version
 
 if (-not $extensionRoot.StartsWith($projectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {

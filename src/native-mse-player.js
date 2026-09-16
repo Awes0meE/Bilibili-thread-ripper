@@ -534,8 +534,9 @@
         startTime: Math.max(0, Number(playbackState.time) || 0),
         forceStartTime: Boolean(playbackState.forceTime),
         internalSeekTarget: null,
-        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode),
-        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode)
+        // One ban list per video, shared by every quality and by the audio track.
+        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode, options.cdnBans),
+        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode, options.cdnBans)
       };
       session = candidate;
       if (previous) disposeSession(previous, false);
@@ -707,7 +708,7 @@
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.1",
+        version: "0.9.1.2",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
