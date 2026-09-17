@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>BTR 0.9.1.2 油猴脚本测试</title></head>
+<body style="margin:0;background:#21232b;color:#eee;font:16px system-ui">
+  <div style="padding:24px">BTR 0.9.1.2 油猴脚本测试（页面里没有扩展接口）</div>
+  <div id="bilibili-player"><div class="bpx-player-container" style="width:960px;height:540px;background:#2b2f40">
+    <video style="width:100%;height:100%" muted></video>
+    <div class="bpx-player-ctrl-setting-menu-right"><div class="bpx-player-ctrl-setting-others">其他设置</div></div>
+  </div></div>
+  <script>
+    // ?mode=sandbox imitates a userscript manager that runs the script outside the page:
+    // unsafeWindow is another object and the manager provides its menu and injection APIs.
+    const sandbox = new URLSearchParams(location.search).get("mode") === "sandbox";
+    history.replaceState(null, "", "/video/BV1userA0001");
+    window.__INITIAL_STATE__ = { videoData: { bvid: "BV1userA0001", cid: 101 } };
+    window.__playinfo__ = { data: { dash: { video: [], audio: [] } } };
+    window.__userscriptTest = { calls: [], menus: [], injected: 0, statusRequests: 0 };
+    window.addEventListener("message", event => { if (event.data?.type === "get-stats") __userscriptTest.statusRequests += 1; });
+    window.fetch = async input => {
+      const url = new URL(String(input), location.href);
+      return new Response(JSON.stringify(url.pathname.endsWith("/view")
+        ? { code: 0, data: { bvid: url.searchParams.get("bvid"), cid: 101, pages: [{ cid: 101 }] } }
+        : { code: 0, data: { dash: { video: [], audio: [] } } }), { headers: { "content-type": "application/json" } });
+    };
+    // The userscript still loads the real player core; this page keeps a fake one so no media is needed.
+    const factory = {
+      createNativePlayer(options) {
+        const video = options.container.querySelector("video");
+        __userscriptTest.calls.push({ options });
+        setTimeout(() => options.onState({ playerState: "ready", quality: "1080P", codec: "av1", activeThreads: 3 }), 0);
+        return { video, applySettings() {}, destroy() {} };
+      }
+    };
+    Object.defineProperty(window, "__BILI_NATIVE_MSE_PLAYER_FACTORY__", { configurable: false, get: () => factory, set() {} });
+    if (sandbox) {
+      window.unsafeWindow = { note: "the manager's view of the page" };
+      window.GM_registerMenuCommand = (name, callback) => __userscriptTest.menus.push({ name, callback });
+      window.GM_addElement = (parent, tag, attributes) => {
+        __userscriptTest.injected += 1;
+        const element = document.createElement(tag);
+        Object.assign(element, attributes);
+        parent.append(element);
+        return element;
+      };
+    }
+  </script>
+  <script src="/user_scripts/bilibili-thread-ripper.user.js"></script>
+</body>
+</html>

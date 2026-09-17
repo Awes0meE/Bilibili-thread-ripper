@@ -23,17 +23,15 @@
 
 `0.9.x` 已经不再替换 B 站播放器。播放器界面、弹幕、字幕、快捷键、清晰度切换和各种原生功能全部继续使用 B 站自己的，插件只接管底层的视频与音频下载。
 
-如果想要更变态的效果可以选择[0.8.9.2](https://github.com/MrTangLuyao/Bilibili-thread-ripper/releases/tag/0.8.9.2) 这是最后一个替换原本播放器的版本 可能在某些时候0.8.X 版本加载会更流畅
-
-
-
-
+~~如果想要更变态的效果可以选择[0.8.9.2](https://github.com/MrTangLuyao/Bilibili-thread-ripper/releases/tag/0.8.9.2) 这是最后一个替换原本播放器的版本 可能在某些时候0.8.X 版本加载会更流畅~~
 
 > 本项目是非官方、实验性质的开源扩展。它不会绕过会员、登录、区域、清晰度、审核状态、数字版权保护或媒体签名限制。
 
 ## 安装
 
-### 从发布页安装
+### 有两种方式安装，对于Chrome内核的比如Chrome,Edge,Opera 等浏览器可以优先尝试插件版，这版通过了多次测试，对于Firefox，Safari浏览器的用户可以尝试实验性的油猴脚本，搭配Tampermonkey插件使用。
+
+### 方式1 插件安装
 
 1. 在项目发布页下载最新的扩展压缩包；
 2. 将压缩包完整解压到固定目录，不要直接在压缩包里打开；
@@ -42,6 +40,16 @@
 5. 点击“加载已解压的扩展程序”；
 6. 选择解压后的扩展目录，该目录中应直接包含 `manifest.json`；
 7. 刷新已经打开的哔哩哔哩视频页面。
+
+### 方式2 油猴脚本安装
+
+1. 装 [Tampermonkey](https://www.tampermonkey.net/)
+2. 点这里：[**安装线程撕裂者**](https://raw.githubusercontent.com/MrTangLuyao/Bilibili-thread-ripper/main/user_scripts/bilibili-thread-ripper.user.js)
+3. 打开 B 站视频，完事
+
+- 有新版会自动更新
+- 设置在播放器 ⚙ → 更多播放设置
+- Chrome / Edge 没反应：扩展管理 → Tampermonkey → 详情 → 打开“允许用户脚本”（老版本是打开“开发者模式”）
 
 ### 从源码安装
 
@@ -418,6 +426,7 @@ src/       原生播放器接管、多线程下载、Range 校验和 CDN 选择
 popup/     侧边栏与线程速度显示
 icons/     扩展图标
 scripts/   Windows 构建脚本
+user_scripts/ 油猴脚本（自动生成）和它的小适配层
 dev/       本地回归测试
 ```
 
@@ -428,6 +437,14 @@ Windows PowerShell 构建：
 ```
 
 构建结果会写入 `dist`。扩展签名私钥保存在本地 `private` 目录，并已被仓库忽略，任何情况下都不要上传。
+
+油猴脚本：改完 `src` 后运行下面这条，重新生成 `user_scripts/bilibili-thread-ripper.user.js`，一起提交。
+
+```powershell
+.\scripts\build-userscript.ps1
+```
+
+油猴只看版本号更新，想让大家收到新版，记得先改 `manifest.json` 里的版本。
 
 ## 开源协议
 
