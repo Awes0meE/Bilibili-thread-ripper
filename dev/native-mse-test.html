@@ -17,6 +17,39 @@
     <div class="bpx-player-container"><video muted></video><div class="bpx-player-controls">B 站原生控制栏占位</div></div>
   </div>
   <pre id="native-mse-result">starting</pre>
+  <script>
+    (() => {
+      const query = new URLSearchParams(location.search);
+      // ?codec=hevc|avc|av1 leaves only that video codec, like a browser without the others.
+      const prefixes = { hevc: ["hev1", "hvc1"], avc: ["avc1"], av1: ["av01"] }[query.get("codec")];
+      if (prefixes) {
+        const isTypeSupported = MediaSource.isTypeSupported.bind(MediaSource);
+        MediaSource.isTypeSupported = (type) => {
+          const codecs = /codecs="([^"]+)"/.exec(String(type))?.[1] || "";
+          if (String(type).startsWith("video/") && !prefixes.some((prefix) => codecs.startsWith(prefix))) return false;
+          return isTypeSupported(type);
+        };
+      }
+      // ?strictDuration=1 refuses to shorten the duration, as browsers do when buffered HEVC
+      // frames run past the new value.
+      window.__durationRefusals = 0;
+      if (query.get("strictDuration") === "1") {
+        const descriptor = Object.getOwnPropertyDescriptor(MediaSource.prototype, "duration");
+        Object.defineProperty(MediaSource.prototype, "duration", {
+          configurable: true,
+          enumerable: descriptor.enumerable,
+          get: descriptor.get,
+          set(value) {
+            if (Number(value) < descriptor.get.call(this)) {
+              window.__durationRefusals += 1;
+              throw new DOMException("Setting duration below highest presentation timestamp of any buffered coded frames is disallowed.", "InvalidStateError");
+            }
+            descriptor.set.call(this, value);
+          }
+        });
+      }
+    })();
+  </script>
   <script src="/src/range-core.js"></script>
   <script src="/src/cdn-resolver.js"></script>
   <script src="/src/sidx.js"></script>

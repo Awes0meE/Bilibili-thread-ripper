@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 线程撕裂者
 // @namespace    https://github.com/MrTangLuyao/Bilibili-thread-ripper
-// @version      0.9.1.2
+// @version      0.9.1.3
 // @description  保留哔哩哔哩原生播放器，通过多 CDN、多 Range 并发下载改善视频缓冲速度。
 // @author       MrTangLuyao
 // @license      MIT
@@ -1481,16 +1481,22 @@ const chrome = (() => {
           candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
           return;
         }
-        const ends = candidate.tracks.map((track) => track.sidx.segments.at(-1)?.endTime).filter((value) => Number.isFinite(value) && value > 0);
-        const playableEnd = ends.length ? Math.min(...ends) : 0;
-        if (playableEnd > 0 && Math.abs(candidate.mediaSource.duration - playableEnd) > 0.01) candidate.mediaSource.duration = playableEnd;
+        // endOfStream() itself trims the duration to the end of the buffered media. Setting a
+        // shorter duration from the SIDX first is refused once coded frames run past it (HEVC
+        // frames often end a few milliseconds after the SIDX total), which kept the stream open
+        // and left the player buffering at the end forever.
         candidate.mediaSource.endOfStream();
         candidate.streamEnded = true;
         publishState();
       }).catch((error) => {
         candidate.ending = false;
         if (sessionIsCurrent(candidate) && error?.name !== "InvalidStateError") fatal(candidate, error);
-        else if (sessionIsCurrent(candidate)) candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
+        else if (sessionIsCurrent(candidate)) {
+          // A buffer that just started updating is retried. Say so if it keeps failing.
+          candidate.endAttempts = (candidate.endAttempts || 0) + 1;
+          if (candidate.endAttempts === 40) options.onLog?.("视频结尾没能正常收尾", `结束媒体流一直失败，播放器可能停在结尾。\n原因：${String(error?.message || error).slice(0, 160)}`, "error", "playback");
+          candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
+        }
       });
     }
 
@@ -1785,7 +1791,7 @@ const chrome = (() => {
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.2",
+        version: "0.9.1.3",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
@@ -2013,7 +2019,7 @@ const chrome = (() => {
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.2",
+    version: "0.9.1.3",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -3069,7 +3075,7 @@ const chrome = (() => {
       getSettings: () => ({ ...settings }),
       getStats: () => ({ ...stats, takeoverError: stats.takeoverError ? { ...stats.takeoverError } : null, threadSpeeds: stats.threadSpeeds.map((item) => ({ ...item })) }),
       restart: () => restartPlayer(true),
-      version: "0.9.1.2"
+      version: "0.9.1.3"
     })
   });
   publish();
@@ -3386,7 +3392,7 @@ const chrome = (() => {
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.2";
+  const VERSION = "0.9.1.3";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -3580,7 +3586,7 @@ const chrome = (() => {
 
     const tip = document.createElement("p");
     tip.className = "btr-onboarding-tip";
-    tip.textContent = "推荐先使用大陆 CDN 和 8 线程。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
+    tip.textContent = "推荐大陆 CDN，线程数推荐 8 到 32，可以先从 8 开始，不够流畅再往上加。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
     const save = document.createElement("button");
     save.type = "button";
     save.className = "btr-onboarding-save";

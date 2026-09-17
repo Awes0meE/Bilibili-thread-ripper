@@ -16,6 +16,22 @@ if (-not $extensionRoot.StartsWith($projectRoot, [System.StringComparison]::Ordi
   throw "构建目录不在项目内，已停止。"
 }
 
+# Compress-Archive in Windows PowerShell stores names like src\bridge.js, which macOS and
+# Linux extract as flat files with backslashes in their names. Store src/bridge.js instead.
+function New-ZipFromFolder([string]$Folder, [string]$Destination) {
+  Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+  $prefix = [System.IO.Path]::GetFullPath($Folder).TrimEnd("\") + "\"
+  $archive = [System.IO.Compression.ZipFile]::Open($Destination, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    foreach ($file in Get-ChildItem -LiteralPath $Folder -Recurse -File | Sort-Object FullName) {
+      $name = $file.FullName.Substring($prefix.Length).Replace("\", "/")
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $name, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+  } finally {
+    $archive.Dispose()
+  }
+}
+
 if (Test-Path -LiteralPath $distRoot) {
   Remove-Item -LiteralPath $distRoot -Recurse -Force
 }
@@ -32,7 +48,7 @@ New-Item -ItemType Directory -Path (Join-Path $extensionRoot "icons") | Out-Null
 Copy-Item -Path (Join-Path $projectRoot "icons\*.png") -Destination (Join-Path $extensionRoot "icons")
 
 $zipPath = Join-Path $distRoot "bilibili-thread-ripper-v$version.zip"
-Compress-Archive -Path (Join-Path $extensionRoot "*") -DestinationPath $zipPath -CompressionLevel Optimal
+New-ZipFromFolder $extensionRoot $zipPath
 
 New-Item -ItemType Directory -Path $sourceRoot | Out-Null
 foreach ($file in @("manifest.json", "README.md", "LICENSE")) {
@@ -42,7 +58,7 @@ foreach ($folder in @("src", "popup", "icons", "scripts", "vendor", "pics")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $folder) -Destination $sourceRoot -Recurse
 }
 $sourceZipPath = Join-Path $distRoot "Bilibili-线程撕裂者-v$version-source.zip"
-Compress-Archive -Path (Join-Path $sourceRoot "*") -DestinationPath $sourceZipPath -CompressionLevel Optimal
+New-ZipFromFolder $sourceRoot $sourceZipPath
 
 if (Test-Path -LiteralPath $ChromePath) {
   $arguments = @("--pack-extension=$extensionRoot", "--no-message-box")

@@ -83,6 +83,23 @@
     }
   }
   const debug = root.__nativeMseTestPlayer.getDebug();
+  // Play the last seconds: the stream has to end and the video has to fire "ended".
+  let endTarget = 0;
+  let endedFired = false;
+  if (!probe.errors.length && Number(video.duration) > 20) {
+    video.addEventListener("ended", () => { endedFired = true; }, { once: true });
+    endTarget = Math.max(0, video.duration - 4);
+    video.muted = true;
+    video.currentTime = endTarget;
+    video.play().catch(() => {});
+    const endStartedAt = Date.now();
+    while (Date.now() - endStartedAt < 30000 && !endedFired && !probe.errors.length) {
+      if (video.paused && !video.ended && !video.seeking) video.play().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  const endDebug = root.__nativeMseTestPlayer.getDebug();
+  const endDuration = Number(video.duration) || 0;
   video.src = "data:video/mp4;base64,";
   video.load();
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -106,13 +123,19 @@
     startupBackwardJumps,
     seekTarget,
     seekReloads: debug.seekReloads,
+    requestedCodec: query.get("codec") || "",
+    endTarget,
+    endedFired,
+    endMediaSourceState: endDebug.mediaSourceState,
+    endDuration,
+    durationRefusals: root.__durationRefusals || 0,
     maxActive: probe.maxActive,
     transfers: probe.transfers,
     segments: probe.segments,
     nativeSourceChanges: probe.nativeSourceChanges,
     errors: probe.errors
   };
-  output.pass = output.version === "0.9.1.2"
+  output.pass = output.version === "0.9.1.3"
     && output.architecture === "bilibili-native-ui-progressive-mse-0.8-core"
     && output.originalUiCount === 1
     && output.videoCount === 1
@@ -124,6 +147,10 @@
     && output.progressiveAppends >= 2
     && output.tracks.length === 2
     && output.seekReloads >= 1
+    && (!output.requestedCodec || output.codec === output.requestedCodec)
+    && output.endedFired
+    && output.endMediaSourceState === "ended"
+    && output.durationRefusals === 0
     && output.maxActive <= 32
     && output.maxActive >= 2
     && output.nativeSourceChanges === 1

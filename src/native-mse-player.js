@@ -404,16 +404,22 @@
           candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
           return;
         }
-        const ends = candidate.tracks.map((track) => track.sidx.segments.at(-1)?.endTime).filter((value) => Number.isFinite(value) && value > 0);
-        const playableEnd = ends.length ? Math.min(...ends) : 0;
-        if (playableEnd > 0 && Math.abs(candidate.mediaSource.duration - playableEnd) > 0.01) candidate.mediaSource.duration = playableEnd;
+        // endOfStream() itself trims the duration to the end of the buffered media. Setting a
+        // shorter duration from the SIDX first is refused once coded frames run past it (HEVC
+        // frames often end a few milliseconds after the SIDX total), which kept the stream open
+        // and left the player buffering at the end forever.
         candidate.mediaSource.endOfStream();
         candidate.streamEnded = true;
         publishState();
       }).catch((error) => {
         candidate.ending = false;
         if (sessionIsCurrent(candidate) && error?.name !== "InvalidStateError") fatal(candidate, error);
-        else if (sessionIsCurrent(candidate)) candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
+        else if (sessionIsCurrent(candidate)) {
+          // A buffer that just started updating is retried. Say so if it keeps failing.
+          candidate.endAttempts = (candidate.endAttempts || 0) + 1;
+          if (candidate.endAttempts === 40) options.onLog?.("视频结尾没能正常收尾", `结束媒体流一直失败，播放器可能停在结尾。\n原因：${String(error?.message || error).slice(0, 160)}`, "error", "playback");
+          candidate.endRetryTimer = setTimeout(() => maybeEndStream(candidate), 50);
+        }
       });
     }
 
@@ -708,7 +714,7 @@
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.2",
+        version: "0.9.1.3",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,

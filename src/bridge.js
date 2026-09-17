@@ -2,7 +2,7 @@
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.2";
+  const VERSION = "0.9.1.3";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -196,7 +196,7 @@
 
     const tip = document.createElement("p");
     tip.className = "btr-onboarding-tip";
-    tip.textContent = "推荐先使用大陆 CDN 和 8 线程。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
+    tip.textContent = "推荐大陆 CDN，线程数推荐 8 到 32，可以先从 8 开始，不够流畅再往上加。以后可在 B 站播放器的 ⚙ 设置中随时修改。";
     const save = document.createElement("button");
     save.type = "button";
     save.className = "btr-onboarding-save";
