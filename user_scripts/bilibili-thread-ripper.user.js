@@ -311,13 +311,15 @@ const chrome = (() => {
     }
   }
 
-  function swapOrdinaryHost(rawUrl, targetHost) {
-    if (isAkamaiUrl(rawUrl)) return null;
+  function swapOrdinaryHost(rawUrl, targetHost, allowAkamai = false) {
+    if (!allowAkamai && isAkamaiUrl(rawUrl)) return null;
     const host = String(targetHost || "").toLowerCase();
     if (!GLOBAL_HOSTS.includes(host)) return null;
     try {
       const url = new URL(rawUrl);
-      url.host = host;
+      // Assigning url.host alone keeps a non-standard port, such as a peer CDN's :4483.
+      url.hostname = host;
+      url.port = "";
       return url.href;
     } catch (_error) {
       return null;
@@ -331,9 +333,19 @@ const chrome = (() => {
       .map(safeMediaUrl)
       .filter(Boolean)
       .filter((value, index, all) => all.indexOf(value) === index);
-    const donor = originals.find((url) => !isAkamaiUrl(url));
     const hosts = mode === "mainland" ? MAINLAND_HOSTS : OVERSEAS_HOSTS;
-    const synthetic = donor ? hosts.map((host) => swapOrdinaryHost(donor, host)).map(safeMediaUrl).filter(Boolean) : [];
+    const donor = originals.find((url) => !isAkamaiUrl(url));
+    // Some overseas accounts are given nothing but akamaized.net addresses. That used to leave
+    // no node at all in mainland mode and a single one in overseas mode. The nodes accept
+    // those signatures too, so only in that case the akamaized.net addresses are the donors.
+    // Bilibili may hand out an address that every node refuses (HTTP 403) next to one that
+    // works, so each of them is tried; the ban list drops the refused one. Node-major order
+    // keeps the first requests spread over several nodes.
+    const synthetic = (donor
+      ? hosts.map((host) => swapOrdinaryHost(donor, host))
+      : hosts.flatMap((host) => originals.map((url) => swapOrdinaryHost(url, host, true))))
+      .map(safeMediaUrl)
+      .filter(Boolean);
     const allowedOriginals = mode === "mainland"
       ? originals.filter((url) => MAINLAND_HOSTS.includes(new URL(url).hostname.toLowerCase()))
       : originals.filter((url) => !MAINLAND_HOSTS.includes(new URL(url).hostname.toLowerCase()));
@@ -345,29 +357,80 @@ const chrome = (() => {
     catch (_error) { return ""; }
   }
 
+  // The signed address without its node: the same address can be asked of any node.
+  function addressOf(value) {
+    try {
+      const url = new URL(value);
+      return url.pathname + url.search;
+    } catch (_error) {
+      return "";
+    }
+  }
+
   // A CDN node that twice fails without sending a single byte is skipped for the
   // rest of the current video. The owner resets the list when the video changes.
+  //
+  // HTTP 4xx means the node answered and refused the signed address, and either side can be
+  // at fault: a node may lack the file, or Bilibili may have handed out an address that every
+  // node refuses. What has delivered data decides it. Refused by a node that serves other
+  // addresses, the address is dropped; refused where other nodes serve it, the node is.
+  // With neither known yet, the reply counts against nobody until one of them delivers.
   function createBanList(options = {}) {
     const limit = Math.max(1, Math.trunc(Number(options.limit)) || 2);
-    const strikes = new Map();
-    const banned = new Set();
+    const emptyReplies = new Map();
+    const goodNodes = new Set();
+    const goodAddresses = new Set();
+    const reported = new Set();
+    let banned = new Set();
+
+    function judge(url, error) {
+      const strikes = new Map();
+      for (const [key, count] of emptyReplies) {
+        const [node, address, refused] = key.split("\n");
+        const blamed = !refused || goodAddresses.has(address) ? `node:${node}`
+          : goodNodes.has(node) ? `address:${address}` : "";
+        if (blamed) strikes.set(blamed, (strikes.get(blamed) || 0) + count);
+      }
+      banned = new Set([...strikes].filter(([, count]) => count >= limit).map(([key]) => key));
+      let added = false;
+      for (const key of banned) {
+        if (reported.has(key)) continue;
+        reported.add(key);
+        added = true;
+        const isNode = key.startsWith("node:");
+        try { options.onBan?.(isNode ? key.slice(5) : hostOf(url), strikes.get(key), error, isNode ? "node" : "address"); } catch (_error) {}
+      }
+      return added;
+    }
+
     return Object.freeze({
       record(url, receivedBytes, error) {
         if (error?.name === "AbortError" || Number(receivedBytes) > 0) return false;
-        const host = hostOf(url);
-        if (!host || banned.has(host)) return false;
-        const count = (strikes.get(host) || 0) + 1;
-        strikes.set(host, count);
-        if (count < limit) return false;
-        banned.add(host);
-        try { options.onBan?.(host, count, error); } catch (_error) {}
-        return true;
+        const node = hostOf(url);
+        if (!node) return false;
+        const status = Number(error?.status) || 0;
+        const key = `${node}\n${addressOf(url)}\n${status >= 400 && status < 500 ? "refused" : ""}`;
+        emptyReplies.set(key, (emptyReplies.get(key) || 0) + 1);
+        return judge(url, error);
       },
-      allows: (url) => !banned.has(hostOf(url)),
-      hosts: () => [...banned],
+      success(url) {
+        const node = hostOf(url);
+        const address = addressOf(url);
+        if (!node || (goodNodes.has(node) && goodAddresses.has(address))) return;
+        goodNodes.add(node);
+        goodAddresses.add(address);
+        judge(url, null);
+      },
+      allows: (url) => !banned.has(`node:${hostOf(url)}`) && !banned.has(`address:${addressOf(url)}`),
+      allowsNode: (url) => !banned.has(`node:${hostOf(url)}`),
+      allowsAddress: (url) => !banned.has(`address:${addressOf(url)}`),
+      hosts: () => [...banned].filter((key) => key.startsWith("node:")).map((key) => key.slice(5)),
       reset() {
-        strikes.clear();
-        banned.clear();
+        emptyReplies.clear();
+        goodNodes.clear();
+        goodAddresses.clear();
+        reported.clear();
+        banned = new Set();
       }
     });
   }
@@ -460,6 +523,7 @@ const chrome = (() => {
     }
 
     function success(url, bps) {
+      bans?.success?.(url);
       const old = health.get(url) || {};
       health.set(url, {
         failures: 0,
@@ -483,11 +547,15 @@ const chrome = (() => {
 
     function status() {
       const now = Date.now();
-      return allUrls().map((url) => {
+      // A refused address says nothing about its node, so it is left out of the node list.
+      const all = allUrls();
+      const usable = bans?.allowsAddress ? all.filter(bans.allowsAddress) : all;
+      return (usable.length ? usable : all).map((url) => {
         const item = health.get(url) || {};
+        const nodeBanned = bans && !(bans.allowsNode ? bans.allowsNode(url) : bans.allows(url));
         return {
           host: new URL(url).hostname,
-          state: bans && !bans.allows(url) ? "banned" : (item.blockedUntil || 0) > now ? "blocked" : item.lastSuccessAt ? "healthy" : "untested",
+          state: nodeBanned ? "banned" : (item.blockedUntil || 0) > now ? "blocked" : item.lastSuccessAt ? "healthy" : "untested",
           bps: item.bps || 0
         };
       });
@@ -632,6 +700,9 @@ const chrome = (() => {
   const core = root.__BILI_RANGE_CORE__;
   if (!core) return;
 
+  const PIECE_ROUNDS = 3;
+  const PIECE_RETRY_WINDOW_MS = 25000;
+
   function abortError(reason) {
     if (reason instanceof Error || reason instanceof DOMException) return reason;
     return new DOMException("播放器任务已取消", "AbortError");
@@ -757,7 +828,8 @@ const chrome = (() => {
         clearTimeout(firstByteTimer);
         const contentRange = core.parseContentRange(response.headers.get("content-range"));
         if (response.status !== 206 || !contentRange || contentRange.start !== piece.start || contentRange.end !== piece.end) {
-          throw new Error(`Range 校验失败：HTTP ${response.status}`);
+          // The status tells a refused signed address (4xx) apart from a node that is down.
+          throw Object.assign(new Error(`Range 校验失败：HTTP ${response.status}`), { status: response.status });
         }
         const bytes = await readBody(response, controller, transferId, settings, received);
         if (bytes.byteLength !== piece.length) throw new Error(`子块长度不符：${bytes.byteLength}/${piece.length}`);
@@ -779,9 +851,25 @@ const chrome = (() => {
       }
     }
 
-    async function downloadPiece(piece, resolver, signal, kind, preferredUrls, startupMode = false, priority = 0) {
+    function pause(delayMs, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(done, delayMs);
+        function done() {
+          signal?.removeEventListener("abort", canceled);
+          resolve();
+        }
+        function canceled() {
+          clearTimeout(timer);
+          reject(abortError(signal.reason));
+        }
+        if (signal?.aborted) canceled();
+        else signal?.addEventListener("abort", canceled, { once: true });
+      });
+    }
+
+    function pieceCandidates(piece, resolver, preferredUrls, round) {
       const preferred = Array.isArray(preferredUrls) ? preferredUrls : [];
-      const preferredOffset = preferred.length ? piece.index % preferred.length : 0;
+      const preferredOffset = preferred.length ? (piece.index + round) % preferred.length : 0;
       const rotatedPreferred = preferred.slice(preferredOffset).concat(preferred.slice(0, preferredOffset));
       const rescue = (typeof resolver.rescueCandidates === "function" ? resolver.rescueCandidates() : resolver.ordered(piece.index))
         .filter((url) => !rotatedPreferred.includes(url));
@@ -794,51 +882,79 @@ const chrome = (() => {
       for (const url of resolver.ordered(piece.index)) {
         if (!candidates.includes(url)) candidates.push(url);
       }
-      const settings = core.normalizeSettings(getSettings());
-      const limit = Math.min(8, candidates.length);
-      const allowed = (url) => typeof resolver.allows !== "function" || resolver.allows(url);
-      const tried = new Set();
-      let lastError = null;
+      return candidates;
+    }
 
+    async function downloadPiece(piece, resolver, signal, kind, preferredUrls, startupMode = false, priority = 0) {
+      const settings = core.normalizeSettings(getSettings());
+      const allowed = (url) => typeof resolver.allows !== "function" || resolver.allows(url);
       const startup = startupMode === true || startupMode === "probe";
       const probe = startupMode === "probe";
-      const batchWidth = probe ? limit : 2;
-      while (tried.size < limit) {
-        if (signal?.aborted) throw abortError(signal.reason);
-        // A node banned while this piece was waiting is skipped, unless only banned nodes are left.
-        const untried = candidates.filter((url) => !tried.has(url));
-        const open = untried.filter(allowed);
-        const pair = (open.length ? open : untried).slice(0, batchWidth);
-        if (!pair.length) break;
-        pair.forEach((url) => tried.add(url));
-        const controllers = pair.map(() => new AbortController());
-        const cancelAll = () => controllers.forEach((controller) => controller.abort(abortError(signal?.reason)));
-        if (signal?.aborted) cancelAll();
-        else signal?.addEventListener("abort", cancelAll, { once: true });
-        const attempts = pair.map((url, pairIndex) => (async () => {
-          if (pairIndex) await new Promise((resolve, reject) => {
-            const delay = probe ? 0 : startup ? Math.min(250, settings.hedgeDelayMs) : settings.hedgeDelayMs;
-            const timer = setTimeout(resolve, delay);
-            const canceled = () => {
-              clearTimeout(timer);
-              reject(abortError(controllers[pairIndex].signal.reason));
-            };
-            if (controllers[pairIndex].signal.aborted) canceled();
-            else controllers[pairIndex].signal.addEventListener("abort", canceled, { once: true });
-          });
-          return attempt(piece, url, controllers[pairIndex].signal, kind, resolver, priority + (pairIndex ? 20 : 0));
-        })());
-        try {
-          const winner = await Promise.any(attempts);
-          controllers.forEach((controller) => {
-            if (!controller.signal.aborted) controller.abort(new DOMException("并发副本已取消", "AbortError"));
-          });
-          return winner;
-        } catch (aggregate) {
-          lastError = aggregate?.errors?.at?.(-1) || aggregate;
+      const startedAt = performance.now();
+      let lastError = null;
+
+      // Failing a piece ends acceleration for the whole video, and the list can be as short as
+      // one working address. One slow reply must not decide that, so the list is walked again
+      // after a pause; node health and bans have changed by then, so it is rebuilt each time.
+      for (let round = 0; round < PIECE_ROUNDS; round += 1) {
+        if (round) {
+          if (performance.now() - startedAt > PIECE_RETRY_WINDOW_MS) break;
+          await pause(Math.min(2000, 500 * (2 ** (round - 1))), signal);
+        }
+        const candidates = pieceCandidates(piece, resolver, preferredUrls, round);
+        const limit = Math.min(8, candidates.length);
+        const batchWidth = probe ? limit : 2;
+        const tried = new Set();
+        while (tried.size < limit) {
           if (signal?.aborted) throw abortError(signal.reason);
-        } finally {
-          signal?.removeEventListener("abort", cancelAll);
+          // A node banned while this piece was waiting is skipped, unless only banned nodes are left.
+          const untried = candidates.filter((url) => !tried.has(url));
+          const open = untried.filter(allowed);
+          const pair = (open.length ? open : untried).slice(0, batchWidth);
+          if (!pair.length) break;
+          pair.forEach((url) => tried.add(url));
+          const controllers = pair.map(() => new AbortController());
+          const cancelAll = () => controllers.forEach((controller) => controller.abort(abortError(signal?.reason)));
+          if (signal?.aborted) cancelAll();
+          else signal?.addEventListener("abort", cancelAll, { once: true });
+          // A first copy that is refused at once (HTTP 403) should not leave the piece idle
+          // for the rest of the hedge delay.
+          let firstFailed = () => {};
+          const firstFailure = new Promise((resolve) => { firstFailed = resolve; });
+          const attempts = pair.map((url, pairIndex) => (async () => {
+            if (pairIndex) await new Promise((resolve, reject) => {
+              const delay = probe ? 0 : startup ? Math.min(250, settings.hedgeDelayMs) : settings.hedgeDelayMs;
+              const timer = setTimeout(resolve, delay);
+              firstFailure.then(() => {
+                clearTimeout(timer);
+                resolve();
+              });
+              const canceled = () => {
+                clearTimeout(timer);
+                reject(abortError(controllers[pairIndex].signal.reason));
+              };
+              if (controllers[pairIndex].signal.aborted) canceled();
+              else controllers[pairIndex].signal.addEventListener("abort", canceled, { once: true });
+            });
+            try {
+              return await attempt(piece, url, controllers[pairIndex].signal, kind, resolver, priority + (pairIndex ? 20 : 0));
+            } catch (error) {
+              if (!pairIndex) firstFailed();
+              throw error;
+            }
+          })());
+          try {
+            const winner = await Promise.any(attempts);
+            controllers.forEach((controller) => {
+              if (!controller.signal.aborted) controller.abort(new DOMException("并发副本已取消", "AbortError"));
+            });
+            return winner;
+          } catch (aggregate) {
+            lastError = aggregate?.errors?.at?.(-1) || aggregate;
+            if (signal?.aborted) throw abortError(signal.reason);
+          } finally {
+            signal?.removeEventListener("abort", cancelAll);
+          }
         }
       }
       throw lastError || new Error("没有可用 CDN");
@@ -860,13 +976,7 @@ const chrome = (() => {
       return attempt(piece, url, controller.signal, kind, resolver, priority);
     }
 
-    async function downloadStartupRange(range, resolver, options) {
-      const candidates = (typeof resolver.startupCandidates === "function" ? resolver.startupCandidates() : resolver.urls())
-        .filter((url, index, all) => all.indexOf(url) === index)
-        .slice(0, 3);
-      if (!candidates.length) throw new Error("没有可用 CDN");
-      semaphore.setLimit(core.normalizeSettings(getSettings()).concurrency);
-      const piece = { index: 0, start: range.start, end: range.end, length: range.length };
+    async function startupAttempt(piece, candidates, resolver, options) {
       const controllers = candidates.map(() => new AbortController());
       const cancelAll = () => controllers.forEach((controller) => {
         if (!controller.signal.aborted) controller.abort(abortError(options.signal?.reason));
@@ -893,15 +1003,43 @@ const chrome = (() => {
         controllers.forEach((controller) => {
           if (!controller.signal.aborted) controller.abort(new DOMException("并发副本已取消", "AbortError"));
         });
-        return {
-          bytes: winner.bytes,
-          pieceCount: 1,
-          total: winner.total || null,
-          hosts: [new URL(winner.url).hostname]
-        };
+        return winner;
       } finally {
         options.signal?.removeEventListener("abort", cancelAll);
       }
+    }
+
+    async function downloadStartupRange(range, resolver, options) {
+      semaphore.setLimit(core.normalizeSettings(getSettings()).concurrency);
+      const piece = { index: 0, start: range.start, end: range.end, length: range.length };
+      const startedAt = performance.now();
+      let lastError = null;
+      // The addresses that just failed are backing off by the next round, so each round
+      // moves on to the next three.
+      for (let round = 0; round < PIECE_ROUNDS; round += 1) {
+        if (round) {
+          if (performance.now() - startedAt > PIECE_RETRY_WINDOW_MS) break;
+          await pause(Math.min(2000, 500 * (2 ** (round - 1))), options.signal);
+        }
+        let candidates = (typeof resolver.startupCandidates === "function" ? resolver.startupCandidates() : resolver.urls())
+          .filter((url, index, all) => all.indexOf(url) === index)
+          .slice(0, 3);
+        if (!candidates.length && round) candidates = resolver.ordered(round).slice(0, 3);
+        if (!candidates.length) break;
+        try {
+          const winner = await startupAttempt(piece, candidates, resolver, options);
+          return {
+            bytes: winner.bytes,
+            pieceCount: 1,
+            total: winner.total || null,
+            hosts: [new URL(winner.url).hostname]
+          };
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal.reason);
+          lastError = error;
+        }
+      }
+      throw lastError || new Error("没有可用 CDN");
     }
 
     async function downloadStartupMediaRange(range, resolver, options, settings) {
@@ -2034,8 +2172,9 @@ const chrome = (() => {
   // Restarting the takeover for the same video keeps the list.
   let cdnBanRoute = "";
   const cdnBans = root.__BILI_CDN_RESOLVER_FACTORY__?.createBanList({
-    onBan(host) {
-      notices?.log("已停用这个 CDN 节点", `${host} 两次没有返回任何数据，这个视频接下来不再使用它。`, "error", "", cdnBanRoute, "download");
+    onBan(host, _count, _error, kind) {
+      if (kind === "address") notices?.log("已停用一个下载地址", "B 站给的一个下载地址一直被服务器拒绝，这个视频接下来改用其他地址。", "info", "", cdnBanRoute, "download");
+      else notices?.log("已停用这个 CDN 节点", `${host} 两次没有返回任何数据，这个视频接下来不再使用它。`, "error", "", cdnBanRoute, "download");
     }
   }) || null;
   let playerContainer = null;
@@ -2059,6 +2198,10 @@ const chrome = (() => {
   let takeoverFailureCount = 0;
   let takeoverFailureStartedAt = 0;
   let takeoverErrorSequence = 1;
+  let autoRetakeTimer = null;
+  let autoRetakeRoute = "";
+  let autoRetakeCount = 0;
+  let autoRetakeAt = 0;
   let compatibilityReloadTimer = null;
   let compatibilityReloadRoute = "";
   let compatibilityReloadTicket = 0;
@@ -2127,6 +2270,30 @@ const chrome = (() => {
     }
     publish();
     scheduleCompatibilityFailureReload(route);
+  }
+
+  // A failed download used to leave the video on Bilibili's own connection until the page
+  // changed. Most such failures are one slow CDN reply, so the takeover is tried again a few
+  // times with a growing pause. The compatibility modes reload the page instead.
+  function scheduleAutoRetake(route) {
+    if (settings.compatibilityMode !== "off") return;
+    const now = Date.now();
+    if (autoRetakeRoute !== route || now - autoRetakeAt > 120000) {
+      autoRetakeRoute = route;
+      autoRetakeCount = 0;
+    }
+    if (autoRetakeCount >= 3) return;
+    autoRetakeCount += 1;
+    autoRetakeAt = now;
+    const attempt = autoRetakeCount;
+    clearTimeout(autoRetakeTimer);
+    autoRetakeTimer = setTimeout(() => {
+      autoRetakeTimer = null;
+      if (!settings.enabled || player || failedRoute !== route || routeIdentity()?.key !== route) return;
+      notices?.log("正在自动重新接管", `刚才的下载出了问题，现在重新接管这个视频（第 ${attempt} 次）。`, "info", "", route, "takeover");
+      failedRoute = "";
+      restartPlayer(true);
+    }, 4000 * (2 ** (attempt - 1)));
   }
 
   function readCompatibilityReloadState() {
@@ -3068,6 +3235,7 @@ const chrome = (() => {
               earlyMask?.release?.();
               stats.playerState = "native-fallback";
               publish();
+              scheduleAutoRetake(route);
             }
           }, 3500);
         },
@@ -3146,6 +3314,8 @@ const chrome = (() => {
     } else if (event.data.type === "get-stats") {
       publish();
     } else if (event.data.type === "retry-takeover") {
+      clearTimeout(autoRetakeTimer);
+      autoRetakeCount = 0;
       cancelCompatibilityReload(false);
       clearTakeoverFailure();
       stats.lastError = "";
@@ -4131,7 +4301,7 @@ const chrome = (() => {
 })();
 
 /* popup/popup.html, popup/popup.css */
-const POPUP_HTML = "\u003cmain\u003e\n      \u003cheader\u003e\n        \u003cdiv class=\"logo\" aria-hidden=\"true\"\u003eB\u003c/div\u003e\n        \u003ch1\u003e线程撕裂者\u003c/h1\u003e\n        \u003clabel class=\"switch\" title=\"启用或停用\"\u003e\n          \u003cinput id=\"enabled\" type=\"checkbox\"\u003e\n          \u003cspan\u003e\u003c/span\u003e\n        \u003c/label\u003e\n      \u003c/header\u003e\n\n      \u003csection class=\"mode-select\" aria-label=\"CDN 模式\"\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"mode\" value=\"mainland\"\u003e\u003cspan\u003e大陆\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"mode\" value=\"overseas\"\u003e\u003cspan\u003e海外\u003c/span\u003e\u003c/label\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"compatibility-select\" aria-label=\"兼容模式\"\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"off\"\u003e\u003cspan\u003e标准模式\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"a\"\u003e\u003cspan\u003e兼容模式 A\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"b\"\u003e\u003cspan\u003e兼容模式 B\u003c/span\u003e\u003c/label\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"controls\"\u003e\n        \u003cdiv class=\"control-title\"\u003e\n          \u003clabel for=\"concurrency\"\u003e线程加载数\u003c/label\u003e\n          \u003coutput id=\"thread-value\" for=\"concurrency\"\u003e8\u003c/output\u003e\n        \u003c/div\u003e\n        \u003cdiv class=\"slider\"\u003e\n          \u003cdiv id=\"slider-fill\" class=\"slider-fill\" aria-hidden=\"true\"\u003e\u003c/div\u003e\n          \u003cinput id=\"concurrency\" type=\"range\" min=\"0\" max=\"5\" step=\"1\" value=\"1\" aria-label=\"线程加载数\" aria-valuetext=\"8\"\u003e\n        \u003c/div\u003e\n        \u003cdiv class=\"scale\" aria-hidden=\"true\"\u003e\n          \u003cspan\u003e4\u003c/span\u003e\u003cspan\u003e8\u003c/span\u003e\u003cspan\u003e16\u003c/span\u003e\u003cspan\u003e32\u003c/span\u003e\u003cspan\u003e64\u003c/span\u003e\u003cspan\u003e128\u003c/span\u003e\n        \u003c/div\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"notice-controls\" aria-label=\"提示设置\"\u003e\n        \u003cdiv class=\"notice-row\"\u003e\u003clabel for=\"error-notices\"\u003e显示错误\u003c/label\u003e\u003clabel class=\"switch\"\u003e\u003cinput id=\"error-notices\" type=\"checkbox\" aria-label=\"显示错误\"\u003e\u003cspan\u003e\u003c/span\u003e\u003c/label\u003e\u003c/div\u003e\n        \u003cdiv class=\"notice-row\"\u003e\u003clabel for=\"debug-notices\"\u003eDebug 模式\u003c/label\u003e\u003clabel class=\"switch\"\u003e\u003cinput id=\"debug-notices\" type=\"checkbox\" aria-label=\"Debug 模式\"\u003e\u003cspan\u003e\u003c/span\u003e\u003c/label\u003e\u003c/div\u003e\n        \u003cfieldset id=\"debug-filters\" class=\"debug-filters\" hidden\u003e\n          \u003clegend\u003e显示哪些 Debug 消息\u003c/legend\u003e\n          \u003cdiv class=\"debug-filter-actions\"\u003e\u003cbutton id=\"debug-select-all\" type=\"button\"\u003e全选\u003c/button\u003e\u003cbutton id=\"debug-select-none\" type=\"button\"\u003e全不选\u003c/button\u003e\u003c/div\u003e\n          \u003cdiv class=\"debug-filter-options\"\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"takeover\"\u003e接管与切换\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"playback\"\u003e播放与暂停\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"download\"\u003e下载线程\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"buffer\"\u003e缓冲与跳转\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"settings\"\u003e设置变化\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"other\"\u003e其他日志\u003c/label\u003e\n          \u003c/div\u003e\n        \u003c/fieldset\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"current-threads\" aria-live=\"polite\"\u003e\n        \u003cspan\u003e目前总线程\u003c/span\u003e\n        \u003cb id=\"active-count\"\u003e0\u003c/b\u003e\n      \u003c/section\u003e\n\n    \u003c/main\u003e";
+const POPUP_HTML = "<main>\n      <header>\n        <div class=\"logo\" aria-hidden=\"true\">B</div>\n        <h1>线程撕裂者</h1>\n        <label class=\"switch\" title=\"启用或停用\">\n          <input id=\"enabled\" type=\"checkbox\">\n          <span></span>\n        </label>\n      </header>\n\n      <section class=\"mode-select\" aria-label=\"CDN 模式\">\n        <label><input type=\"radio\" name=\"mode\" value=\"mainland\"><span>大陆</span></label>\n        <label><input type=\"radio\" name=\"mode\" value=\"overseas\"><span>海外</span></label>\n      </section>\n\n      <section class=\"compatibility-select\" aria-label=\"兼容模式\">\n        <label><input type=\"radio\" name=\"compatibility-mode\" value=\"off\"><span>标准模式</span></label>\n        <label><input type=\"radio\" name=\"compatibility-mode\" value=\"a\"><span>兼容模式 A</span></label>\n        <label><input type=\"radio\" name=\"compatibility-mode\" value=\"b\"><span>兼容模式 B</span></label>\n      </section>\n\n      <section class=\"controls\">\n        <div class=\"control-title\">\n          <label for=\"concurrency\">线程加载数</label>\n          <output id=\"thread-value\" for=\"concurrency\">8</output>\n        </div>\n        <div class=\"slider\">\n          <div id=\"slider-fill\" class=\"slider-fill\" aria-hidden=\"true\"></div>\n          <input id=\"concurrency\" type=\"range\" min=\"0\" max=\"5\" step=\"1\" value=\"1\" aria-label=\"线程加载数\" aria-valuetext=\"8\">\n        </div>\n        <div class=\"scale\" aria-hidden=\"true\">\n          <span>4</span><span>8</span><span>16</span><span>32</span><span>64</span><span>128</span>\n        </div>\n      </section>\n\n      <section class=\"notice-controls\" aria-label=\"提示设置\">\n        <div class=\"notice-row\"><label for=\"error-notices\">显示错误</label><label class=\"switch\"><input id=\"error-notices\" type=\"checkbox\" aria-label=\"显示错误\"><span></span></label></div>\n        <div class=\"notice-row\"><label for=\"debug-notices\">Debug 模式</label><label class=\"switch\"><input id=\"debug-notices\" type=\"checkbox\" aria-label=\"Debug 模式\"><span></span></label></div>\n        <fieldset id=\"debug-filters\" class=\"debug-filters\" hidden>\n          <legend>显示哪些 Debug 消息</legend>\n          <div class=\"debug-filter-actions\"><button id=\"debug-select-all\" type=\"button\">全选</button><button id=\"debug-select-none\" type=\"button\">全不选</button></div>\n          <div class=\"debug-filter-options\">\n            <label><input type=\"checkbox\" data-debug-category=\"takeover\">接管与切换</label>\n            <label><input type=\"checkbox\" data-debug-category=\"playback\">播放与暂停</label>\n            <label><input type=\"checkbox\" data-debug-category=\"download\">下载线程</label>\n            <label><input type=\"checkbox\" data-debug-category=\"buffer\">缓冲与跳转</label>\n            <label><input type=\"checkbox\" data-debug-category=\"settings\">设置变化</label>\n            <label><input type=\"checkbox\" data-debug-category=\"other\">其他日志</label>\n          </div>\n        </fieldset>\n      </section>\n\n      <section class=\"current-threads\" aria-live=\"polite\">\n        <span>目前总线程</span>\n        <b id=\"active-count\">0</b>\n      </section>\n\n    </main>";
 const POPUP_CSS = ":root {\n  color-scheme: dark;\n  font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", system-ui, sans-serif;\n  background: #17191f;\n  color: #f5f7fb;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  width: auto;\n  min-width: 280px;\n  margin: 0;\n  background: #17191f;\n}\n\nmain {\n  min-height: 100vh;\n  padding: 18px 16px;\n}\n\nheader {\n  display: grid;\n  grid-template-columns: 42px 1fr auto;\n  align-items: center;\n  gap: 11px;\n  margin-bottom: 22px;\n}\n\n.mode-select {\n  display: grid;\n  grid-template-columns: 1fr 1fr;\n  gap: 1px;\n  margin-bottom: 12px;\n  overflow: hidden;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #30343d;\n}\n\n.mode-select label { position: relative; }\n.mode-select input { position: absolute; opacity: 0; }\n.mode-select span {\n  display: block;\n  padding: 10px 6px;\n  color: #949baa;\n  background: #20232a;\n  font-size: 12px;\n  text-align: center;\n  cursor: pointer;\n}\n.mode-select input:checked + span { color: #fff; background: #fb7299; }\n.mode-select input:focus-visible + span { outline: 2px solid #fff; outline-offset: -3px; }\n\n.compatibility-select {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 1px;\n  margin-bottom: 12px;\n  overflow: hidden;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #30343d;\n}\n\n.compatibility-select label { position: relative; }\n.compatibility-select input { position: absolute; opacity: 0; }\n.compatibility-select span {\n  display: block;\n  padding: 10px 3px;\n  color: #949baa;\n  background: #20232a;\n  font-size: 11px;\n  text-align: center;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.compatibility-select input:checked + span { color: #fff; background: #fb7299; }\n.compatibility-select input:focus-visible + span { outline: 2px solid #fff; outline-offset: -3px; }\n\n.logo {\n  display: grid;\n  place-items: center;\n  width: 42px;\n  height: 42px;\n  border-radius: 8px;\n  color: #fff;\n  font-size: 23px;\n  font-weight: 800;\n  background: #fb7299;\n}\n\nh1 { margin: 0; font-size: 17px; letter-spacing: 0.2px; }\n.switch { position: relative; width: 42px; height: 24px; }\n.switch input { position:absolute; inset:0; z-index:1; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; }\n.switch span {\n  position: absolute;\n  inset: 0;\n  border-radius: 999px;\n  background: #313a4c;\n  cursor: pointer;\n  transition: 160ms ease;\n}\n.switch span::after {\n  content: \"\";\n  position: absolute;\n  top: 3px;\n  left: 3px;\n  width: 18px;\n  height: 18px;\n  border-radius: 50%;\n  background: #fff;\n  transition: 160ms ease;\n}\n.switch input:checked + span { background: #fb7299; }\n.switch input:checked + span::after { transform: translateX(18px); }\n.switch input:focus-visible + span { outline: 2px solid #fff; outline-offset: 3px; }\n.notice-controls { margin-top:12px; padding:14px 16px; border:1px solid #30343d; border-radius:8px; background:#20232a; }\n.notice-row { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#c9ced9; font-size:13px; }\n.notice-row + .notice-row { margin-top:14px; }\n.debug-filters { min-width:0; margin:16px 0 0; padding:12px 0 0; border:0; border-top:1px solid #343943; }\n.debug-filters[hidden] { display:none; }\n.debug-filters legend { padding:0 0 4px; color:#c9ced9; font-size:12px; }\n.debug-filter-actions { display:flex; gap:8px; margin-bottom:12px; }\n.debug-filter-actions button { padding:4px 8px; border:1px solid #444b57; border-radius:4px; background:#292d35; color:#d9dee8; font:inherit; font-size:11px; cursor:pointer; }\n.debug-filter-actions button:hover { border-color:#fb7299; }\n.debug-filter-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 8px; }\n.debug-filter-options label { display:flex; align-items:center; gap:7px; color:#c9ced9; font-size:12px; cursor:pointer; }\n.debug-filter-options input { flex:none; width:15px; height:15px; margin:0; accent-color:#fb7299; cursor:pointer; }\n.debug-filter-actions button:focus-visible,.debug-filter-options input:focus-visible { outline:2px solid #fff; outline-offset:3px; }\n\n.controls {\n  padding: 16px;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #20232a;\n}\n\n.control-title {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-bottom: 14px;\n}\n\n.control-title label {\n  color: #c9ced9;\n  font-size: 13px;\n}\n\noutput {\n  min-width: 42px;\n  padding: 4px 8px;\n  border-radius: 5px;\n  color: #fff;\n  background: #fb7299;\n  font-size: 13px;\n  font-weight: 700;\n  text-align: center;\n}\n\n.slider {\n  position: relative;\n  width: 100%;\n  height: 18px;\n  border-radius: 9px;\n  background: #3a3e47;\n}\n\n.slider-fill {\n  position: absolute;\n  top: 0;\n  bottom: 0;\n  left: 0;\n  width: 60%;\n  border-radius: 9px;\n  background: #fb7299;\n  pointer-events: none;\n}\n\ninput[type=\"range\"] {\n  position: absolute;\n  inset: 0;\n  width: 100%;\n  height: 18px;\n  margin: 0;\n  appearance: none;\n  -webkit-appearance: none;\n  border: 0;\n  outline: 0;\n  background: transparent;\n  cursor: pointer;\n}\n\ninput[type=\"range\"]::-webkit-slider-runnable-track {\n  height: 18px;\n  background: transparent;\n}\n\ninput[type=\"range\"]::-webkit-slider-thumb {\n  width: 24px;\n  height: 24px;\n  margin-top: -3px;\n  appearance: none;\n  -webkit-appearance: none;\n  border: 2px solid #ffffff;\n  border-radius: 50%;\n  background: #ffffff;\n}\n\ninput[type=\"range\"]:focus-visible::-webkit-slider-thumb {\n  border-color: #fb7299;\n}\n\n.scale {\n  display: flex;\n  justify-content: space-between;\n  margin-top: 5px;\n  color: #7f8797;\n  font-size: 10px;\n}\n\n.scale span {\n  width: 24px;\n  text-align: center;\n}\n\n.scale span:first-child { text-align: left; }\n.scale span:last-child { text-align: right; }\n\n.current-threads {\n  margin-top: 12px;\n  padding: 16px;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #20232a;\n}\n\n.current-threads {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  color: #c9ced9;\n  font-size: 13px;\n}\n\n.current-threads b {\n  color: #ffffff;\n  font-size: 20px;\n  font-variant-numeric: tabular-nums;\n}";
 
 /* popup/popup.js */
