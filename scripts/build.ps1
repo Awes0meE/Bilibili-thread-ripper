@@ -40,6 +40,7 @@ New-Item -ItemType Directory -Path $privateRoot -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $projectRoot "manifest.json") -Destination $extensionRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $extensionRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot "updates.md") -Destination $extensionRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination $extensionRoot
 foreach ($folder in @("src", "popup", "vendor", "pics")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $folder) -Destination $extensionRoot -Recurse
@@ -51,7 +52,7 @@ $zipPath = Join-Path $distRoot "bilibili-thread-ripper-v$version.zip"
 New-ZipFromFolder $extensionRoot $zipPath
 
 New-Item -ItemType Directory -Path $sourceRoot | Out-Null
-foreach ($file in @("manifest.json", "README.md", "LICENSE")) {
+foreach ($file in @("manifest.json", "README.md", "updates.md", "LICENSE")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $sourceRoot
 }
 foreach ($folder in @("src", "popup", "icons", "scripts", "vendor", "pics")) {

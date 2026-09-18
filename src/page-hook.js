@@ -36,6 +36,12 @@
   }) || null;
   let playerContainer = null;
   let playerLifecycle = 0;
+  let qualityPlayer = null;
+  let syncedQuality = 0;
+  let infoPanel = null;
+  let infoPanelObserver = null;
+  const lastHostByKind = { video: "", audio: "" };
+  const recentBytes = [];
   let failedRoute = "";
   let startingRoute = "";
   let routeGeneration = 0;
@@ -56,7 +62,7 @@
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.3",
+    version: "0.9.1.4",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -86,7 +92,7 @@
 
   function recordTakeoverFailure(route, stage, error, fatal = false) {
     const message = String(error?.message || error || "未知接管错误").slice(0, 180);
-    const stageLabel = { playinfo: "读取视频信息", mse: "播放视频", create: "启动播放器", "playinfo-update": "更新播放信息" }[stage] || "接管视频";
+    const stageLabel = { playinfo: "读取视频信息", mse: "播放视频", create: "启动播放器", "playinfo-update": "更新播放信息", quality: "切换清晰度" }[stage] || "接管视频";
     notices?.log("没能接管这个视频", `${stageLabel}时出了问题。\n${message}`, "error", "", route, "takeover");
     const now = Date.now();
     if (takeoverFailureRoute !== route) {
@@ -353,6 +359,7 @@
         expiresAt: Infinity
       });
       stats.lastHost = host;
+      if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
       publish();
       return id;
     }
@@ -366,6 +373,8 @@
     }
     if (event.phase === "progress") {
       const bytes = Math.max(0, Number(event.bytes) || 0);
+      recentBytes.push({ at: now, bytes });
+      while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
       item.loaded += bytes;
       item.sampleBytes += bytes;
       item.lastByteAt = now;
@@ -816,6 +825,79 @@
     }, 0);
   }
 
+  // Bilibili's quality menu can switch between qualities already in the playinfo without a
+  // new playurl request, so read what was chosen from the native player. 0 means "auto".
+  function nativeQuality() {
+    try { return Math.max(0, Math.trunc(Number(root.player?.getQuality?.()?.newQ)) || 0); }
+    catch (_error) { return 0; }
+  }
+
+  function syncNativeQuality() {
+    const wanted = nativeQuality();
+    if (!player?.setQuality || (qualityPlayer === player && syncedQuality === wanted)) return;
+    const current = player, route = playerRoute, lifecycle = playerLifecycle;
+    qualityPlayer = current;
+    syncedQuality = wanted;
+    notices?.log("跟随播放器切换清晰度", wanted ? `正在换成播放器选的清晰度（${wanted}）。` : "播放器改回了自动，使用这个视频默认的清晰度。", "info", "", route, "playback");
+    current.setQuality(wanted).catch((error) => {
+      if (lifecycle === playerLifecycle && player === current) recordTakeoverFailure(route, "quality", error, true);
+    });
+  }
+
+  function watchQualityMenu(event) {
+    if (!(event.target instanceof Element) || !event.target.closest(".bpx-player-ctrl-quality-menu-item")) return;
+    // Capture phase runs before Bilibili's own handler; read the choice once it has run.
+    setTimeout(syncNativeQuality, 0);
+    setTimeout(syncNativeQuality, 300);
+  }
+
+  // Bilibili's "视频统计信息" panel reads its own player core, which downloads nothing while
+  // BTR plays the video, so its hosts, speeds and segment counts would be stale. The same
+  // rows show what BTR plays and downloads instead.
+  function nativeInfoValues() {
+    const info = player?.getDebug?.();
+    if (!info?.videoType || playerContainer?.dataset.btrMseActive !== "true") return null;
+    const now = Date.now();
+    while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
+    const speed = (kind) => Math.round([...transfers.values()]
+      .filter((item) => item.kind === kind && item.state === "active")
+      .reduce((sum, item) => sum + item.bps, 0) * 8 / 1000);
+    const track = info.tracks?.find((item) => item.kind === "video");
+    const frames = player.video?.getVideoPlaybackQuality?.();
+    return {
+      "Mime Type": `${info.videoType}, ${info.audioType}`,
+      "Player Type": `线程撕裂者 ${stats.version} 接管`,
+      "Video DataRate": `${Math.round(info.videoBandwidth / 1000)} Kbps [${String(info.codec).toUpperCase()}]`,
+      "Audio DataRate": `${Math.round(info.audioBandwidth / 1000)} Kbps`,
+      "Segments": track ? `${track.nextIndex} / ${track.segments}` : undefined,
+      "Dropped Frames": frames ? `${frames.droppedVideoFrames} / ${frames.totalVideoFrames}` : undefined,
+      "Video Host": lastHostByKind.video || undefined,
+      "Audio Host": lastHostByKind.audio || undefined,
+      "Video Speed": `${speed("video")} Kbps`,
+      "Audio Speed": `${speed("audio")} Kbps`,
+      "Network Activity": `${Math.round(recentBytes.reduce((sum, item) => sum + item.bytes, 0) / 1024)} KB`
+    };
+  }
+
+  function updateNativeInfoPanel() {
+    const panel = playerContainer?.querySelector(".bpx-player-info-panel") || null;
+    if (panel !== infoPanel) {
+      infoPanelObserver?.disconnect();
+      infoPanel = panel;
+      infoPanelObserver = panel ? new MutationObserver(updateNativeInfoPanel) : null;
+      infoPanelObserver?.observe(panel, { childList: true, subtree: true, characterData: true });
+    }
+    const values = panel && nativeInfoValues();
+    if (!values) return;
+    for (const line of panel.querySelectorAll(".info-line")) {
+      const title = String(line.querySelector(".info-title")?.textContent || "").replace(/:\s*$/, "").trim();
+      const data = line.querySelector(".info-data");
+      if (data && values[title] !== undefined && data.textContent !== values[title]) data.textContent = values[title];
+    }
+    // Our own writes are not new native updates.
+    infoPanelObserver?.takeRecords();
+  }
+
   async function startPlayer() {
     clearTimeout(restartTimer);
     restartTimer = null;
@@ -905,10 +987,12 @@
       cdnBans?.reset();
       cdnBanRoute = route;
     }
+    const preferredQuality = nativeQuality();
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
         identity,
+        preferredQuality,
         // A collection item is a different video. Its native <video> element
         // can still expose the previous item's currentTime until new metadata
         // arrives, so carrying that value across would clamp short videos to
@@ -992,6 +1076,8 @@
       player = nextPlayer;
       playerRoute = route;
       playerContainer = container;
+      qualityPlayer = nextPlayer;
+      syncedQuality = preferredQuality;
       notices?.attach(nextPlayer.video, route, lifecycle, () => lifecycle === playerLifecycle && player === nextPlayer && playerRoute === routeIdentity()?.key && playerContainer?.isConnected && !["error", "native-fallback", "disabled"].includes(stats.playerState));
       if (isPodSwitch) {
         trustedPodVideoKey = identity.videoKey;
@@ -1089,6 +1175,7 @@
     restartPlayer(false);
   });
   document.addEventListener("click", preparePodSwitch, true);
+  document.addEventListener("click", watchQualityMenu, true);
   const settingsObserver = new MutationObserver(scheduleSettingsMenuSync);
   const startSettingsObserver = () => {
     if (!document.documentElement) {
@@ -1102,6 +1189,8 @@
   setInterval(() => {
     const identity = routeIdentity();
     if (settingsLoaded && settings.enabled && (!player || playerRoute !== identity?.key || !playerContainer?.isConnected || !player.video?.isConnected)) startPlayer();
+    else syncNativeQuality();
+    updateNativeInfoPanel();
     syncSettingsMenu();
   }, 1000);
 
@@ -1112,7 +1201,7 @@
       getSettings: () => ({ ...settings }),
       getStats: () => ({ ...stats, takeoverError: stats.takeoverError ? { ...stats.takeoverError } : null, threadSpeeds: stats.threadSpeeds.map((item) => ({ ...item })) }),
       restart: () => restartPlayer(true),
-      version: "0.9.1.3"
+      version: "0.9.1.4"
     })
   });
   publish();

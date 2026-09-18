@@ -10,7 +10,7 @@
   const initialResume = initialTimeParam === null ? undefined : true;
   video.currentTime = handoffTime;
   const settings = { enabled: true, mode: "mainland", concurrency: 32, bufferAheadSeconds: 24 };
-  const probe = { active: 0, maxActive: 0, transfers: 0, attemptErrors: [], errors: [], state: null, segments: 0, nativeSourceChanges: 0 };
+  const probe = { active: 0, maxActive: 0, transfers: 0, attemptErrors: [], errors: [], state: null, segments: 0, nativeSourceChanges: 0, nativeErrorLogs: [] };
   const config = await fetch("/config").then((response) => response.json());
   const playinfo = await fetch("/playinfo").then((response) => response.json());
   const render = (extra = {}) => {
@@ -44,6 +44,7 @@
       return event.id;
     },
     onSegment() { probe.segments += 1; },
+    onLog(title, detail) { if (title === "B 站原生播放器报错") probe.nativeErrorLogs.push(String(detail)); },
     onState(state) { probe.state = state; render(); },
     onNativeSourceChange() { probe.nativeSourceChanges += 1; },
     onFatal(error) { probe.errors.push(String(error?.message || error)); render(); }
@@ -100,6 +101,10 @@
   }
   const endDebug = root.__nativeMseTestPlayer.getDebug();
   const endDuration = Number(video.duration) || 0;
+  // Bilibili's own toasts stay visible; its error panel is hidden only while BTR plays and
+  // what it said is in the log.
+  const shown = (selector) => getComputedStyle(document.querySelector(selector)).display !== "none";
+  const nativeLayers = { toastVisible: shown(".bpx-player-toast-wrap"), errorHiddenWhileActive: !shown(".bpx-player-error-wrap"), errorLogged: probe.nativeErrorLogs.some((detail) => detail.includes("B 站原生内核报错占位")) };
   video.src = "data:video/mp4;base64,";
   video.load();
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -129,13 +134,14 @@
     endMediaSourceState: endDebug.mediaSourceState,
     endDuration,
     durationRefusals: root.__durationRefusals || 0,
+    nativeLayers,
     maxActive: probe.maxActive,
     transfers: probe.transfers,
     segments: probe.segments,
     nativeSourceChanges: probe.nativeSourceChanges,
     errors: probe.errors
   };
-  output.pass = output.version === "0.9.1.3"
+  output.pass = output.version === "0.9.1.4"
     && output.architecture === "bilibili-native-ui-progressive-mse-0.8-core"
     && output.originalUiCount === 1
     && output.videoCount === 1
@@ -151,6 +157,9 @@
     && output.endedFired
     && output.endMediaSourceState === "ended"
     && output.durationRefusals === 0
+    && output.nativeLayers.toastVisible
+    && output.nativeLayers.errorHiddenWhileActive
+    && output.nativeLayers.errorLogged
     && output.maxActive <= 32
     && output.maxActive >= 2
     && output.nativeSourceChanges === 1

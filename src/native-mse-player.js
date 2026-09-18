@@ -70,7 +70,9 @@
     catch (_error) { return false; }
   }
 
-  function selectRepresentations(playinfo) {
+  // preferredQuality is the quality chosen in the native menu; 0 is "auto" and keeps the
+  // quality the playinfo itself asks for.
+  function selectRepresentations(playinfo, preferredQuality = 0) {
     const body = dashBody(playinfo);
     const dash = body?.dash;
     if (!dash) throw new Error("页面没有 DASH 播放清单");
@@ -90,7 +92,9 @@
       .sort((a, b) => (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0))[0];
     if (!videos.length || !audio) throw new Error("浏览器不支持清单中的视频或音频编码");
     const requestedQuality = Number(body?.quality || body?.qn) || 0;
-    const preferred = videos.find((item) => Number(item.id) === requestedQuality)
+    const preferred = [Number(preferredQuality) || 0, requestedQuality]
+      .map((quality) => quality && videos.find((item) => Number(item.id) === quality))
+      .find(Boolean)
       || videos.find((item) => (Number(item.height) || 0) <= 2160)
       || videos[0];
     return { audio, dash, preferred, videos };
@@ -173,8 +177,11 @@
     const getSettings = options.getSettings;
     const video = options.container.querySelector("video");
     if (!video) throw new Error("没有找到 B 站原生 video 元素");
-    let selection = selectRepresentations(options.playinfo);
+    let currentPlayinfo = options.playinfo;
+    let preferredQuality = Math.max(0, Math.trunc(Number(options.preferredQuality)) || 0);
+    let selection = selectRepresentations(currentPlayinfo, preferredQuality);
     let selectedVideo = selection.preferred;
+    let sessionStarts = 0;
     let session = null;
     let destroyed = false;
     let generationSequence = 0;
@@ -432,9 +439,16 @@
       }, 300);
     }
 
+    // Bilibili's own player core downloads nothing while BTR plays, so it may report errors
+    // about that. The stylesheet hides its error panels only while BTR is active; what they
+    // said goes to the Debug log instead of being lost.
+    let reportedNativeError = "";
     function clearNativeErrorOverlay() {
-      for (const node of options.container.querySelectorAll(".bpx-player-error-wrap,.bpx-player-error-panel,.bpx-player-toast-wrap")) {
-        if (node instanceof HTMLElement) node.style.display = "none";
+      for (const node of options.container.querySelectorAll(".bpx-player-error-wrap,.bpx-player-error-panel")) {
+        const text = String(node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160);
+        if (!text || text === reportedNativeError) continue;
+        reportedNativeError = text;
+        options.onLog?.("B 站原生播放器报错", `线程撕裂者接管时，B 站自己的播放内核不再下载视频，这类报错通常可以忽略。\n原文：${text}`, "info", "playback");
       }
     }
 
@@ -524,6 +538,7 @@
       options.onLog?.("正在准备播放器", `使用 ${qualityLabel(representation)} 清晰度，从 ${Number(playbackState.time || 0).toFixed(2)} 秒开始。`, "info", "takeover");
       const previous = session;
       selectedVideo = representation;
+      sessionStarts += 1;
       const mediaSource = new MediaSource();
       const objectUrl = URL.createObjectURL(mediaSource);
       const candidate = {
@@ -566,6 +581,14 @@
         ]);
         if (!sessionIsCurrent(candidate)) return;
         candidate.tracks = [videoTrack, audioTrack];
+        // A seek made while this session was starting only moves the element's start
+        // position and fires no "seeking" event. Only the indexes are loaded so far, so the
+        // tracks can simply start from there.
+        const requested = Number(video.currentTime) || 0;
+        if (!candidate.forceStartTime && requested > 0 && Math.abs(requested - candidate.startTime) > 0.5) {
+          candidate.startTime = requested;
+          for (const track of candidate.tracks) track.startupIndex = track.nextIndex = sidxTools.segmentIndexAt(track.sidx.segments, requested);
+        }
         const duration = Math.max(
           Number(selection.dash.duration) || 0,
           videoTrack.sidx.segments.at(-1)?.endTime || 0,
@@ -646,12 +669,23 @@
 
     async function updatePlayinfo(playinfo) {
       if (destroyed) return;
-      const next = selectRepresentations(playinfo);
+      const next = selectRepresentations(playinfo, preferredQuality);
+      currentPlayinfo = playinfo;
       const nextVideo = next.preferred;
       const audioChanged = !sameRepresentation(selection.audio, next.audio);
       selection = next;
       if (!audioChanged && sameRepresentation(selectedVideo, nextVideo)) return;
       await startSession(nextVideo, playbackState());
+    }
+
+    // The native quality menu switches between qualities already in the playinfo without
+    // asking for a new one, so the page tells us what was chosen. Choosing the quality that
+    // is already playing does not restart anything.
+    async function setQuality(quality) {
+      const wanted = Math.max(0, Math.trunc(Number(quality)) || 0);
+      if (destroyed || wanted === preferredQuality) return;
+      preferredQuality = wanted;
+      await updatePlayinfo(currentPlayinfo);
     }
 
     function destroy({ resumeNative = true } = {}) {
@@ -711,14 +745,21 @@
     return Object.freeze({
       applySettings() { ensureBuffer(); },
       destroy,
+      setQuality,
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.3",
+        version: "0.9.1.4",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
+        preferredQuality,
+        sessionStarts,
         codec: codecFamily(selectedVideo),
+        videoType: mimeFor(selectedVideo, "video"),
+        audioType: mimeFor(selection.audio, "audio"),
+        videoBandwidth: Number(selectedVideo?.bandwidth) || 0,
+        audioBandwidth: Number(selection.audio?.bandwidth) || 0,
         currentTime: Number(video.currentTime) || 0,
         mediaSourceState: session?.mediaSource?.readyState || "closed",
         playbackActivated: Boolean(session?.playbackActivated),

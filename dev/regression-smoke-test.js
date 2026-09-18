@@ -13,7 +13,9 @@ const { chromium } = require("playwright");
     ["compatibility-mode-test.html?mode=b", "compatibility-result"],
     ["compatibility-navigation-test.html", "compatibility-navigation-result"],
     ["onboarding-test.html", "result"],
-    ["mse-abort-test.html", "mse-abort-result"]
+    ["mse-abort-test.html", "mse-abort-result"],
+    ["quality-sync-test.html", "quality-sync-result"],
+    ["info-panel-test.html", "info-panel-result"]
   ];
   try {
     for (let offset = 0; offset < tests.length; offset += 3) {

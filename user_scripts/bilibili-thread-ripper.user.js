@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 线程撕裂者
 // @namespace    https://github.com/MrTangLuyao/Bilibili-thread-ripper
-// @version      0.9.1.3
+// @version      0.9.1.4
 // @description  保留哔哩哔哩原生播放器，通过多 CDN、多 Range 并发下载改善视频缓冲速度。
 // @author       MrTangLuyao
 // @license      MIT
@@ -1147,7 +1147,9 @@ const chrome = (() => {
     catch (_error) { return false; }
   }
 
-  function selectRepresentations(playinfo) {
+  // preferredQuality is the quality chosen in the native menu; 0 is "auto" and keeps the
+  // quality the playinfo itself asks for.
+  function selectRepresentations(playinfo, preferredQuality = 0) {
     const body = dashBody(playinfo);
     const dash = body?.dash;
     if (!dash) throw new Error("页面没有 DASH 播放清单");
@@ -1167,7 +1169,9 @@ const chrome = (() => {
       .sort((a, b) => (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0))[0];
     if (!videos.length || !audio) throw new Error("浏览器不支持清单中的视频或音频编码");
     const requestedQuality = Number(body?.quality || body?.qn) || 0;
-    const preferred = videos.find((item) => Number(item.id) === requestedQuality)
+    const preferred = [Number(preferredQuality) || 0, requestedQuality]
+      .map((quality) => quality && videos.find((item) => Number(item.id) === quality))
+      .find(Boolean)
       || videos.find((item) => (Number(item.height) || 0) <= 2160)
       || videos[0];
     return { audio, dash, preferred, videos };
@@ -1250,8 +1254,11 @@ const chrome = (() => {
     const getSettings = options.getSettings;
     const video = options.container.querySelector("video");
     if (!video) throw new Error("没有找到 B 站原生 video 元素");
-    let selection = selectRepresentations(options.playinfo);
+    let currentPlayinfo = options.playinfo;
+    let preferredQuality = Math.max(0, Math.trunc(Number(options.preferredQuality)) || 0);
+    let selection = selectRepresentations(currentPlayinfo, preferredQuality);
     let selectedVideo = selection.preferred;
+    let sessionStarts = 0;
     let session = null;
     let destroyed = false;
     let generationSequence = 0;
@@ -1509,9 +1516,16 @@ const chrome = (() => {
       }, 300);
     }
 
+    // Bilibili's own player core downloads nothing while BTR plays, so it may report errors
+    // about that. The stylesheet hides its error panels only while BTR is active; what they
+    // said goes to the Debug log instead of being lost.
+    let reportedNativeError = "";
     function clearNativeErrorOverlay() {
-      for (const node of options.container.querySelectorAll(".bpx-player-error-wrap,.bpx-player-error-panel,.bpx-player-toast-wrap")) {
-        if (node instanceof HTMLElement) node.style.display = "none";
+      for (const node of options.container.querySelectorAll(".bpx-player-error-wrap,.bpx-player-error-panel")) {
+        const text = String(node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160);
+        if (!text || text === reportedNativeError) continue;
+        reportedNativeError = text;
+        options.onLog?.("B 站原生播放器报错", `线程撕裂者接管时，B 站自己的播放内核不再下载视频，这类报错通常可以忽略。\n原文：${text}`, "info", "playback");
       }
     }
 
@@ -1601,6 +1615,7 @@ const chrome = (() => {
       options.onLog?.("正在准备播放器", `使用 ${qualityLabel(representation)} 清晰度，从 ${Number(playbackState.time || 0).toFixed(2)} 秒开始。`, "info", "takeover");
       const previous = session;
       selectedVideo = representation;
+      sessionStarts += 1;
       const mediaSource = new MediaSource();
       const objectUrl = URL.createObjectURL(mediaSource);
       const candidate = {
@@ -1643,6 +1658,14 @@ const chrome = (() => {
         ]);
         if (!sessionIsCurrent(candidate)) return;
         candidate.tracks = [videoTrack, audioTrack];
+        // A seek made while this session was starting only moves the element's start
+        // position and fires no "seeking" event. Only the indexes are loaded so far, so the
+        // tracks can simply start from there.
+        const requested = Number(video.currentTime) || 0;
+        if (!candidate.forceStartTime && requested > 0 && Math.abs(requested - candidate.startTime) > 0.5) {
+          candidate.startTime = requested;
+          for (const track of candidate.tracks) track.startupIndex = track.nextIndex = sidxTools.segmentIndexAt(track.sidx.segments, requested);
+        }
         const duration = Math.max(
           Number(selection.dash.duration) || 0,
           videoTrack.sidx.segments.at(-1)?.endTime || 0,
@@ -1723,12 +1746,23 @@ const chrome = (() => {
 
     async function updatePlayinfo(playinfo) {
       if (destroyed) return;
-      const next = selectRepresentations(playinfo);
+      const next = selectRepresentations(playinfo, preferredQuality);
+      currentPlayinfo = playinfo;
       const nextVideo = next.preferred;
       const audioChanged = !sameRepresentation(selection.audio, next.audio);
       selection = next;
       if (!audioChanged && sameRepresentation(selectedVideo, nextVideo)) return;
       await startSession(nextVideo, playbackState());
+    }
+
+    // The native quality menu switches between qualities already in the playinfo without
+    // asking for a new one, so the page tells us what was chosen. Choosing the quality that
+    // is already playing does not restart anything.
+    async function setQuality(quality) {
+      const wanted = Math.max(0, Math.trunc(Number(quality)) || 0);
+      if (destroyed || wanted === preferredQuality) return;
+      preferredQuality = wanted;
+      await updatePlayinfo(currentPlayinfo);
     }
 
     function destroy({ resumeNative = true } = {}) {
@@ -1788,14 +1822,21 @@ const chrome = (() => {
     return Object.freeze({
       applySettings() { ensureBuffer(); },
       destroy,
+      setQuality,
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.3",
+        version: "0.9.1.4",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
+        preferredQuality,
+        sessionStarts,
         codec: codecFamily(selectedVideo),
+        videoType: mimeFor(selectedVideo, "video"),
+        audioType: mimeFor(selection.audio, "audio"),
+        videoBandwidth: Number(selectedVideo?.bandwidth) || 0,
+        audioBandwidth: Number(selection.audio?.bandwidth) || 0,
         currentTime: Number(video.currentTime) || 0,
         mediaSourceState: session?.mediaSource?.readyState || "closed",
         playbackActivated: Boolean(session?.playbackActivated),
@@ -1999,6 +2040,12 @@ const chrome = (() => {
   }) || null;
   let playerContainer = null;
   let playerLifecycle = 0;
+  let qualityPlayer = null;
+  let syncedQuality = 0;
+  let infoPanel = null;
+  let infoPanelObserver = null;
+  const lastHostByKind = { video: "", audio: "" };
+  const recentBytes = [];
   let failedRoute = "";
   let startingRoute = "";
   let routeGeneration = 0;
@@ -2019,7 +2066,7 @@ const chrome = (() => {
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.3",
+    version: "0.9.1.4",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -2049,7 +2096,7 @@ const chrome = (() => {
 
   function recordTakeoverFailure(route, stage, error, fatal = false) {
     const message = String(error?.message || error || "未知接管错误").slice(0, 180);
-    const stageLabel = { playinfo: "读取视频信息", mse: "播放视频", create: "启动播放器", "playinfo-update": "更新播放信息" }[stage] || "接管视频";
+    const stageLabel = { playinfo: "读取视频信息", mse: "播放视频", create: "启动播放器", "playinfo-update": "更新播放信息", quality: "切换清晰度" }[stage] || "接管视频";
     notices?.log("没能接管这个视频", `${stageLabel}时出了问题。\n${message}`, "error", "", route, "takeover");
     const now = Date.now();
     if (takeoverFailureRoute !== route) {
@@ -2316,6 +2363,7 @@ const chrome = (() => {
         expiresAt: Infinity
       });
       stats.lastHost = host;
+      if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
       publish();
       return id;
     }
@@ -2329,6 +2377,8 @@ const chrome = (() => {
     }
     if (event.phase === "progress") {
       const bytes = Math.max(0, Number(event.bytes) || 0);
+      recentBytes.push({ at: now, bytes });
+      while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
       item.loaded += bytes;
       item.sampleBytes += bytes;
       item.lastByteAt = now;
@@ -2779,6 +2829,79 @@ const chrome = (() => {
     }, 0);
   }
 
+  // Bilibili's quality menu can switch between qualities already in the playinfo without a
+  // new playurl request, so read what was chosen from the native player. 0 means "auto".
+  function nativeQuality() {
+    try { return Math.max(0, Math.trunc(Number(root.player?.getQuality?.()?.newQ)) || 0); }
+    catch (_error) { return 0; }
+  }
+
+  function syncNativeQuality() {
+    const wanted = nativeQuality();
+    if (!player?.setQuality || (qualityPlayer === player && syncedQuality === wanted)) return;
+    const current = player, route = playerRoute, lifecycle = playerLifecycle;
+    qualityPlayer = current;
+    syncedQuality = wanted;
+    notices?.log("跟随播放器切换清晰度", wanted ? `正在换成播放器选的清晰度（${wanted}）。` : "播放器改回了自动，使用这个视频默认的清晰度。", "info", "", route, "playback");
+    current.setQuality(wanted).catch((error) => {
+      if (lifecycle === playerLifecycle && player === current) recordTakeoverFailure(route, "quality", error, true);
+    });
+  }
+
+  function watchQualityMenu(event) {
+    if (!(event.target instanceof Element) || !event.target.closest(".bpx-player-ctrl-quality-menu-item")) return;
+    // Capture phase runs before Bilibili's own handler; read the choice once it has run.
+    setTimeout(syncNativeQuality, 0);
+    setTimeout(syncNativeQuality, 300);
+  }
+
+  // Bilibili's "视频统计信息" panel reads its own player core, which downloads nothing while
+  // BTR plays the video, so its hosts, speeds and segment counts would be stale. The same
+  // rows show what BTR plays and downloads instead.
+  function nativeInfoValues() {
+    const info = player?.getDebug?.();
+    if (!info?.videoType || playerContainer?.dataset.btrMseActive !== "true") return null;
+    const now = Date.now();
+    while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
+    const speed = (kind) => Math.round([...transfers.values()]
+      .filter((item) => item.kind === kind && item.state === "active")
+      .reduce((sum, item) => sum + item.bps, 0) * 8 / 1000);
+    const track = info.tracks?.find((item) => item.kind === "video");
+    const frames = player.video?.getVideoPlaybackQuality?.();
+    return {
+      "Mime Type": `${info.videoType}, ${info.audioType}`,
+      "Player Type": `线程撕裂者 ${stats.version} 接管`,
+      "Video DataRate": `${Math.round(info.videoBandwidth / 1000)} Kbps [${String(info.codec).toUpperCase()}]`,
+      "Audio DataRate": `${Math.round(info.audioBandwidth / 1000)} Kbps`,
+      "Segments": track ? `${track.nextIndex} / ${track.segments}` : undefined,
+      "Dropped Frames": frames ? `${frames.droppedVideoFrames} / ${frames.totalVideoFrames}` : undefined,
+      "Video Host": lastHostByKind.video || undefined,
+      "Audio Host": lastHostByKind.audio || undefined,
+      "Video Speed": `${speed("video")} Kbps`,
+      "Audio Speed": `${speed("audio")} Kbps`,
+      "Network Activity": `${Math.round(recentBytes.reduce((sum, item) => sum + item.bytes, 0) / 1024)} KB`
+    };
+  }
+
+  function updateNativeInfoPanel() {
+    const panel = playerContainer?.querySelector(".bpx-player-info-panel") || null;
+    if (panel !== infoPanel) {
+      infoPanelObserver?.disconnect();
+      infoPanel = panel;
+      infoPanelObserver = panel ? new MutationObserver(updateNativeInfoPanel) : null;
+      infoPanelObserver?.observe(panel, { childList: true, subtree: true, characterData: true });
+    }
+    const values = panel && nativeInfoValues();
+    if (!values) return;
+    for (const line of panel.querySelectorAll(".info-line")) {
+      const title = String(line.querySelector(".info-title")?.textContent || "").replace(/:\s*$/, "").trim();
+      const data = line.querySelector(".info-data");
+      if (data && values[title] !== undefined && data.textContent !== values[title]) data.textContent = values[title];
+    }
+    // Our own writes are not new native updates.
+    infoPanelObserver?.takeRecords();
+  }
+
   async function startPlayer() {
     clearTimeout(restartTimer);
     restartTimer = null;
@@ -2868,10 +2991,12 @@ const chrome = (() => {
       cdnBans?.reset();
       cdnBanRoute = route;
     }
+    const preferredQuality = nativeQuality();
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
         identity,
+        preferredQuality,
         // A collection item is a different video. Its native <video> element
         // can still expose the previous item's currentTime until new metadata
         // arrives, so carrying that value across would clamp short videos to
@@ -2955,6 +3080,8 @@ const chrome = (() => {
       player = nextPlayer;
       playerRoute = route;
       playerContainer = container;
+      qualityPlayer = nextPlayer;
+      syncedQuality = preferredQuality;
       notices?.attach(nextPlayer.video, route, lifecycle, () => lifecycle === playerLifecycle && player === nextPlayer && playerRoute === routeIdentity()?.key && playerContainer?.isConnected && !["error", "native-fallback", "disabled"].includes(stats.playerState));
       if (isPodSwitch) {
         trustedPodVideoKey = identity.videoKey;
@@ -3052,6 +3179,7 @@ const chrome = (() => {
     restartPlayer(false);
   });
   document.addEventListener("click", preparePodSwitch, true);
+  document.addEventListener("click", watchQualityMenu, true);
   const settingsObserver = new MutationObserver(scheduleSettingsMenuSync);
   const startSettingsObserver = () => {
     if (!document.documentElement) {
@@ -3065,6 +3193,8 @@ const chrome = (() => {
   setInterval(() => {
     const identity = routeIdentity();
     if (settingsLoaded && settings.enabled && (!player || playerRoute !== identity?.key || !playerContainer?.isConnected || !player.video?.isConnected)) startPlayer();
+    else syncNativeQuality();
+    updateNativeInfoPanel();
     syncSettingsMenu();
   }, 1000);
 
@@ -3075,7 +3205,7 @@ const chrome = (() => {
       getSettings: () => ({ ...settings }),
       getStats: () => ({ ...stats, takeoverError: stats.takeoverError ? { ...stats.takeoverError } : null, threadSpeeds: stats.threadSpeeds.map((item) => ({ ...item })) }),
       restart: () => restartPlayer(true),
-      version: "0.9.1.3"
+      version: "0.9.1.4"
     })
   });
   publish();
@@ -3392,7 +3522,7 @@ const chrome = (() => {
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.3";
+  const VERSION = "0.9.1.4";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -4111,11 +4241,12 @@ window.addEventListener("unload", () => clearInterval(timer));
   "use strict";
 
   const HOST_ID = "__bilibili_thread_ripper_userscript_settings__";
+  const DIALOG_ID = "__bilibili_thread_ripper_userscript_dialog__";
   const PANEL_STYLE = `
     .btr-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); }
     .btr-popup { position: fixed; top: 72px; right: 24px; width: 320px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow: auto; border: 1px solid #30343d; border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .45); }
     .btr-popup main { min-height: 0; }
-    .btr-close { display: block; width: calc(100% - 32px); margin: 0 16px 16px; padding: 8px; border: 1px solid #444b57; border-radius: 6px; background: #292d35; color: #d9dee8; font: inherit; font-size: 13px; cursor: pointer; }
+    .btr-close { position: sticky; bottom: 12px; display: block; width: calc(100% - 32px); margin: 0 16px 16px; padding: 8px; border: 1px solid #444b57; border-radius: 6px; background: #292d35; color: #d9dee8; font: inherit; font-size: 13px; cursor: pointer; box-shadow: 0 -6px 12px #17191f; }
     .btr-close:hover { border-color: #fb7299; }
     .btr-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
   `;
@@ -4123,9 +4254,19 @@ window.addEventListener("unload", () => clearInterval(timer));
 
   function open() {
     if (current) return;
+    // A modal <dialog> sits in the browser's top layer and is the only interactive part of
+    // the page while it is open. A plain fixed layer can end up under the page's own
+    // top-layer elements, or inside a part of the page made inert, and then clicks on it
+    // land on whatever is beneath (issue #8).
+    const dialog = document.createElement("dialog");
+    dialog.id = DIALOG_ID;
+    dialog.style.cssText = "all:initial!important;display:block!important;position:fixed!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;overflow:visible!important;z-index:2147483646!important;";
+    const dialogStyle = document.createElement("style");
+    dialogStyle.textContent = `#${DIALOG_ID}::backdrop{background:transparent}`;
     const host = document.createElement("div");
     host.id = HOST_ID;
-    host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;z-index:2147483646!important;";
+    host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;";
+    dialog.append(dialogStyle, host);
     const shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     // The sidebar styles its whole page; here the same rules apply to the floating panel.
@@ -4165,13 +4306,17 @@ window.addEventListener("unload", () => clearInterval(timer));
       for (const listener of unloadListeners) listener();
       for (const listener of storageListeners) chrome.storage.onChanged.removeListener(listener);
       document.removeEventListener("keydown", onKey, true);
-      host.remove();
+      dialog.remove();
     };
     current = { host, close };
     backdrop.addEventListener("click", close);
     closeButton.addEventListener("click", close);
     document.addEventListener("keydown", onKey, true);
-    (document.body || document.documentElement).append(host);
+    // Esc on a modal dialog closes it natively; clean up the same way as the button.
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
+    (document.body || document.documentElement).append(dialog);
+    try { dialog.showModal(); }
+    catch (_error) { dialog.setAttribute("open", ""); }
     runPopup(shadow, pageChrome, pageWindow);
     panel.focus();
   }

@@ -120,6 +120,40 @@ const settingsOf = page => page.evaluate(() => __biliThreadRipperDebug.getSettin
     await page.locator(settingsHost).waitFor({ state: "detached" });
     console.log("PASS 菜单再点一次、Esc、点空白处都能关闭，关闭后不再轮询");
 
+    // Issue #8: the page's own top layer (an open popover, or a modal dialog of the page)
+    // must not cover the settings or take the click on "关闭". The button also stays in
+    // reach when the window is too short for the whole panel.
+    const clickClose = async (target) => {
+      const box = await target.locator(`${settingsHost} .btr-close`).boundingBox();
+      await target.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await target.locator(settingsHost).waitFor({ state: "detached", timeout: 3000 });
+    };
+    for (const cover of ["popover", "dialog"]) {
+      await page.evaluate((kind) => {
+        window.__coverClicks = 0;
+        const node = document.createElement(kind === "dialog" ? "dialog" : "div");
+        node.id = "page-cover";
+        node.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;max-width:none;max-height:none;margin:0;padding:0;border:0;background:rgba(0,128,255,.05)";
+        node.addEventListener("click", () => { window.__coverClicks += 1; });
+        document.body.append(node);
+        if (kind === "dialog") node.showModal();
+        else { node.popover = "manual"; node.showPopover(); }
+      }, cover);
+      await openSettings(page);
+      await page.locator(`${settingsHost} .btr-popup`).waitFor();
+      await clickClose(page);
+      assert.equal(await page.evaluate(() => window.__coverClicks), 0, `the page's ${cover} took the click`);
+      await page.evaluate(() => { const node = document.getElementById("page-cover"); if (node.open) node.close(); else node.hidePopover?.(); node.remove(); });
+    }
+    await page.setViewportSize({ width: 1100, height: 480 });
+    await openSettings(page);
+    await page.locator(`${settingsHost} .btr-popup`).waitFor();
+    const shortBox = await page.locator(`${settingsHost} .btr-close`).boundingBox();
+    assert.ok(shortBox.y + shortBox.height <= 480, "关闭 is below the bottom of a short window");
+    await clickClose(page);
+    await page.setViewportSize({ width: 1100, height: 900 });
+    console.log("PASS 页面自己的弹层或模态框开着时设置页仍在最上层，窗口很矮时“关闭”也点得到");
+
     // A second tab follows changes and a reload keeps them.
     const second = await context.newPage();
     second.on("pageerror", error => errors.push(error.message));

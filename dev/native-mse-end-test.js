@@ -1,6 +1,7 @@
 "use strict";
 // Needs dev/server.js started with BTR_TEST_BVID and BTR_TEST_CID (real bilibili media).
-// Runs native-mse-test.html with each video codec: startup, seek, and playing to the end.
+// Runs native-mse-test.html with each video codec (startup, seek, playing to the end) and
+// native-mse-quality-test.html (following the quality chosen in Bilibili's menu).
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
@@ -11,7 +12,8 @@ const cases = [
   "?codec=av1",
   // Browsers refuse a shorter duration once HEVC frames run past it. The end must not depend on it.
   "?codec=hevc&strictDuration=1",
-  "?codec=av1&strictDuration=1"
+  "?codec=av1&strictDuration=1",
+  "native-mse-quality-test.html"
 ];
 
 (async () => {
@@ -25,12 +27,13 @@ const cases = [
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         try {
-          await page.goto(`http://127.0.0.1:18763/dev/native-mse-test.html${query}`);
+          await page.goto(`http://127.0.0.1:18763/dev/${query.endsWith(".html") ? query : `native-mse-test.html${query}`}`);
           const result = page.locator("#native-mse-result");
           await page.waitForFunction(() => document.getElementById("native-mse-result")?.dataset.pass, null, { timeout: 90000 });
           const output = JSON.parse(await result.innerText());
           assert.equal(output.pass, true, JSON.stringify(output));
           assert.deepEqual(errors, []);
+          if (output.summary) return `PASS ${query}：${output.summary}`;
           return `PASS ${query || "(默认编码)"}：${output.codec}，从 ${output.endTarget.toFixed(1)} 秒播到结尾 ${output.endDuration.toFixed(3)} 秒并正常结束`;
         } finally {
           await context.close();
