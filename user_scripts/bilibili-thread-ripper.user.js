@@ -1382,6 +1382,11 @@ const chrome = (() => {
     return time;
   }
 
+  function bufferedStart(sourceBuffer, fallback) {
+    try { return sourceBuffer.buffered.length ? sourceBuffer.buffered.start(0) : fallback; }
+    catch (_error) { return fallback; }
+  }
+
   function mediaBytesPerSecond(track) {
     const segment = track?.sidx?.segments?.[track.startupIndex];
     if (segment?.durationSeconds > 0 && segment?.length > 0) return segment.length / segment.durationSeconds;
@@ -1564,16 +1569,18 @@ const chrome = (() => {
             break;
           }
           if (bufferedEndAt(track.sourceBuffer, current) - current >= core.normalizeSettings(getSettings()).bufferAheadSeconds) break;
-          const batchSize = track.started ? (track.kind === "video" ? 3 : 4) : 1;
-          const batch = [];
+          // A sliding window: the next segment starts as soon as one has been appended. Waiting
+          // for a whole batch left the connections idle until its slowest segment arrived.
+          const windowSize = track.started ? (track.kind === "video" ? 3 : 4) : 1;
           let projectedEnd = bufferedEndAt(track.sourceBuffer, current);
-          for (let offset = 0; offset < batchSize; offset += 1) {
+          for (let offset = 0; offset < windowSize; offset += 1) {
             const index = track.nextIndex + offset;
             const segment = track.sidx.segments[index];
             if (!segment || projectedEnd - current >= core.normalizeSettings(getSettings()).bufferAheadSeconds) break;
+            projectedEnd = segment.endTime;
+            if (track.prefetches.has(index)) continue;
             const startup = !track.startupComplete && index === track.startupIndex;
-            const prefetched = track.prefetches.get(index);
-            batch.push(prefetched || segmentDownload(candidate, track, segment, index, {
+            track.prefetches.set(index, segmentDownload(candidate, track, segment, index, {
               priority: startup ? 120 : Math.max(30, 55 - offset * 5),
               startup,
               onStartupScheduled: startup ? () => {
@@ -1587,25 +1594,23 @@ const chrome = (() => {
                 ensureBuffer(candidate);
               } : null
             }));
-            projectedEnd = segment.endTime;
           }
-          if (!batch.length) break;
-          for (const pending of batch) {
-            const settled = await pending;
-            track.prefetches.delete(settled.index);
-            if (settled.error) throw settled.error;
-            if (!sessionIsCurrent(candidate) || generation !== candidate.generation || signal.aborted) break;
-            if (!settled.result.streamed) await append(candidate, track, settled.result.bytes, generation);
-            if (!track.startupComplete && settled.index === track.startupIndex) {
-              track.startupComplete = true;
-              candidate.startupCompletedBytes += settled.result.byteLength;
-              updateStartupProfile(candidate);
-            }
-            track.nextIndex = settled.index + 1;
-            track.started = true;
-            options.onSegment?.({ kind: track.kind, bytes: settled.result.byteLength, pieces: settled.result.pieceCount, hosts: settled.result.hosts });
-            ensureBuffer(candidate);
+          const pending = track.prefetches.get(track.nextIndex);
+          if (!pending) break;
+          const settled = await pending;
+          track.prefetches.delete(settled.index);
+          if (settled.error) throw settled.error;
+          if (!sessionIsCurrent(candidate) || generation !== candidate.generation || signal.aborted) break;
+          if (!settled.result.streamed) await append(candidate, track, settled.result.bytes, generation);
+          if (!track.startupComplete && settled.index === track.startupIndex) {
+            track.startupComplete = true;
+            candidate.startupCompletedBytes += settled.result.byteLength;
+            updateStartupProfile(candidate);
           }
+          track.nextIndex = settled.index + 1;
+          track.started = true;
+          options.onSegment?.({ kind: track.kind, bytes: settled.result.byteLength, pieces: settled.result.pieceCount, hosts: settled.result.hosts });
+          ensureBuffer(candidate);
         }
       } catch (error) {
         if (!signal.aborted && sessionIsCurrent(candidate)) fatal(candidate, error);
@@ -1721,7 +1726,12 @@ const chrome = (() => {
     function prune(candidate = session) {
       if (!candidate || !sessionIsCurrent(candidate) || candidate.fatal || video.currentTime < 75) return;
       const end = video.currentTime - 30;
-      Promise.all(candidate.tracks.map((track) => removeRange(candidate, track, 0, end).catch(() => {}))).catch(() => {});
+      for (const track of candidate.tracks) {
+        // A removal waits in the same queue as the appends. Asking for one on every tick put a
+        // buffer operation there every 750 ms, so it waits until ten seconds can go at once.
+        if (end - bufferedStart(track.sourceBuffer, end) < 10) continue;
+        removeRange(candidate, track, 0, end).catch(() => {});
+      }
     }
 
     function disposeSession(candidate, detach = true) {
@@ -2531,7 +2541,9 @@ const chrome = (() => {
       });
       stats.lastHost = host;
       if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
-      publish();
+      // One segment starts and ends dozens of transfers within the same moment. Publishing
+      // each of them at once copied the whole thread list to the side panel every time.
+      schedulePublish();
       return id;
     }
     const item = transfers.get(Number(event?.id));
@@ -2561,13 +2573,13 @@ const chrome = (() => {
     } else {
       if (event.phase === "cancel") {
         transfers.delete(item.id);
-        publish();
+        schedulePublish();
         return event.id;
       }
       item.state = event.phase === "done" ? "done" : "error";
       item.finalBps = event.phase === "done" ? item.loaded * 1000 / Math.max(1, now - item.startedAt) : 0;
       item.expiresAt = now + 3500;
-      publish();
+      schedulePublish();
     }
     return event.id;
   }
@@ -2741,6 +2753,13 @@ const chrome = (() => {
         }
       });
     } else {
+      // Bilibili's own request answered first, so ours for the same video is no longer needed.
+      // Waiting for it delayed the takeover by two more round trips to the API.
+      if (startingRoute === identity.key) {
+        routeRequestController?.abort();
+        routeRequestController = null;
+        startingRoute = "";
+      }
       clearTimeout(restartTimer);
       restartTimer = setTimeout(startPlayer, 0);
     }
@@ -2826,6 +2845,30 @@ const chrome = (() => {
       document.querySelector(".bilibili-player")
     ].filter(Boolean);
     return candidates.find((node) => node.querySelector("video") && node.clientWidth > 200) || null;
+  }
+
+  // The first request to a node otherwise pays for its TLS handshake, which takes over a second
+  // on the distant ones. The downloads are sent without cookies and the browser only reuses a
+  // connection opened the same way, hence crossOrigin. Asked again for every video, because
+  // idle connections are closed after a while.
+  let preconnectKey = "";
+  function preconnectCdnNodes(route) {
+    const key = `${settings.mode}:${route}`;
+    if (preconnectKey === key) return;
+    const factory = root.__BILI_CDN_RESOLVER_FACTORY__;
+    const hosts = settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const parent = document.head || document.documentElement;
+    if (!Array.isArray(hosts) || !parent) return;
+    preconnectKey = key;
+    for (const link of document.querySelectorAll("link[data-btr-preconnect]")) link.remove();
+    for (const host of hosts) {
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = `https://${host}`;
+      link.crossOrigin = "anonymous";
+      link.dataset.btrPreconnect = "";
+      parent.append(link);
+    }
   }
 
   function settingGroup(title, name, values, selected) {
@@ -3096,6 +3139,7 @@ const chrome = (() => {
       }
     }
     const route = identity.key;
+    preconnectCdnNodes(route);
     if (takeoverFailureRoute && takeoverFailureRoute !== route) {
       clearTakeoverFailure();
       stats.lastError = "";
