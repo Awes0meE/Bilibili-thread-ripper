@@ -22,26 +22,22 @@ function checkFile() {
   assert.deepEqual(values("grant").sort(), ["GM_addElement", "GM_registerMenuCommand", "unsafeWindow"]);
   assert.match(header, /^\/\/ @noframes$/m);
   new vm.Script(script, { filename: "bilibili-thread-ripper.user.js" });
-  // The extension's page code and its sidebar are included unchanged and in order.
-  const parts = [
-    ...["user_scripts/adapter/storage-shim.js", ...manifest.content_scripts.flatMap(item => item.js)].map(file => `/* ${file} */\n${source(file)}\n`),
-    `/* popup/popup.js */\nfunction runPopup(document, chrome, window) {\n${source("popup/popup.js")}\n}\n`,
-    `/* user_scripts/adapter/settings-panel.js */\n${source("user_scripts/adapter/settings-panel.js")}\n`,
-    `/* user_scripts/adapter/loader.js */\n${source("user_scripts/adapter/loader.js")}\n`
-  ];
+  // The extension's content scripts, settings panel included, are there unchanged and in
+  // order; a file both script lists use appears once.
+  const files = [...new Set(["user_scripts/adapter/storage-shim.js", ...manifest.content_scripts.flatMap(item => item.js), "user_scripts/adapter/loader.js"])];
   let position = 0;
-  for (const part of parts) {
+  for (const file of files) {
+    const part = `/* ${file} */\n${source(file)}\n`;
     const at = script.indexOf(part, position);
-    assert.ok(at >= position, `${part.split("\n")[0]} missing, changed or out of order`);
+    assert.ok(at >= position, `${file} missing, changed or out of order`);
+    assert.equal(script.indexOf(`/* ${file} */\n`, at + 1), -1, `${file} is included twice`);
     position = at;
   }
-  const constant = name => JSON.parse(script.match(new RegExp(`^const ${name} = (.+);$`, "m"))[1]);
-  assert.equal(constant("POPUP_HTML"), source("popup/popup.html").match(/<main>[\s\S]*<\/main>/)[0]);
-  assert.equal(constant("POPUP_CSS"), source("popup/popup.css"));
-  console.log("PASS 油猴脚本头部、自动更新地址和打包内容正确，侧边栏设置页原样打包");
+  assert.ok(files.includes("src/settings-panel.js"));
+  console.log("PASS 油猴脚本头部、自动更新地址和打包内容正确，设置面板和扩展是同一份代码");
 }
 
-const settingsHost = "#__bilibili_thread_ripper_userscript_settings__";
+const settingsHost = "#__bilibili_thread_ripper_settings__";
 const openSettings = page => page.evaluate(() => document.dispatchEvent(new CustomEvent("btr-userscript-open-settings")));
 const settingsOf = page => page.evaluate(() => __biliThreadRipperDebug.getSettings());
 
@@ -71,17 +67,20 @@ const settingsOf = page => page.evaluate(() => __biliThreadRipperDebug.getSettin
     // The player menu keeps only what the extension puts there.
     const menu = page.locator("#__bilibili_thread_ripper_native_settings__");
     await menu.waitFor({ state: "attached" });
-    assert.deepEqual(await menu.locator(".btr-native-setting-title").allTextContents(), ["线程撕裂者 CDN", "并发线程", "兼容模式"]);
+    assert.deepEqual(await menu.locator(".btr-native-setting-title").allTextContents(), ["线程撕裂者 CDN", "并发线程"]);
+    assert.deepEqual(await menu.locator('input[name="btr-native-mode"]').evaluateAll(nodes => nodes.map(node => node.value)), ["mainland", "overseas", "custom"]);
     console.log("PASS 首次打开显示欢迎设置；播放器菜单保持扩展原样");
 
-    // The menu command opens the extension's sidebar page inside the bilibili page.
+    // The menu command opens the settings panel inside the bilibili page, the same one the
+    // extension's toolbar icon opens.
     await openSettings(page);
     const panel = page.locator(`${settingsHost} .btr-popup`);
     await panel.waitFor();
     assert.equal(await panel.locator("h1").textContent(), "线程撕裂者");
     assert.equal(await panel.locator("#enabled").isChecked(), true);
     assert.equal(await panel.locator('input[name="mode"][value="mainland"]').isChecked(), true);
-    assert.equal(await panel.locator('input[name="compatibility-mode"][value="off"]').isChecked(), true);
+    assert.equal(await panel.locator('input[name="mode"]').count(), 3);
+    assert.equal(await panel.locator("#custom-hosts").isVisible(), false);
     assert.equal(await panel.locator("#thread-value").textContent(), "8");
     assert.equal(await panel.locator("#error-notices").isChecked(), false);
     assert.equal(await panel.locator("#debug-filters").isVisible(), false);
@@ -101,7 +100,7 @@ const settingsOf = page => page.evaluate(() => __biliThreadRipperDebug.getSettin
     await panel.locator("#debug-filters").waitFor();
     assert.equal(await panel.locator("[data-debug-category]:checked").count(), 6);
     await page.locator(".mode").first().waitFor();
-    console.log("PASS 设置页就是扩展侧边栏：开关、线程、Debug 分类和实时线程数都能用");
+    console.log("PASS 设置面板：开关、线程、Debug 分类和实时线程数都能用");
 
     // Closing stops the status polling; opening again starts clean.
     await page.keyboard.press("Escape");
@@ -169,6 +168,34 @@ const settingsOf = page => page.evaluate(() => __biliThreadRipperDebug.getSettin
     await page.waitForFunction(() => window.__biliThreadRipperDebug?.getSettings().mode === "overseas");
     assert.deepEqual(await settingsOf(page).then(value => [value.concurrency, value.errorNotices, value.debugNotices]), [16, true, true]);
     console.log("PASS 另一个标签页同步设置，刷新后设置保留，不再弹欢迎设置");
+
+    // "自定义" in the gear menu opens the panel on the custom servers. Known servers are
+    // ticked, others typed in; only Bilibili's video servers are taken, and what is typed
+    // there does not reach the player's keyboard shortcuts.
+    await page.evaluate(() => { window.__pageKeys = 0; document.addEventListener("keydown", () => { window.__pageKeys += 1; }); });
+    await page.locator('#__bilibili_thread_ripper_native_settings__ input[name="btr-native-mode"][value="custom"]').check({ force: true });
+    await panel.waitFor();
+    await page.waitForFunction(() => __biliThreadRipperDebug.getSettings().mode === "custom");
+    await panel.locator("#custom-hosts").waitFor();
+    assert.equal(await panel.locator("#custom-count").textContent(), "0");
+    assert.equal(await panel.locator("#custom-empty").isVisible(), true);
+    await panel.locator('#known-hosts input[value="upos-sz-mirrorcos.bilivideo.com"]').check();
+    await page.waitForFunction(() => __biliThreadRipperDebug.getSettings().customHosts.join() === "upos-sz-mirrorcos.bilivideo.com");
+    await panel.locator("#host-input").pressSequentially("example.com");
+    await panel.locator("#host-input").press("Enter");
+    assert.match(await panel.locator("#host-error").textContent(), /不是 B 站/);
+    await panel.locator("#host-input").fill("");
+    await panel.locator("#host-input").pressSequentially("https://CN-GDFS-CT-01-01.bilivideo.com:4483/x");
+    await panel.locator("#host-form button").click();
+    await page.waitForFunction(() => __biliThreadRipperDebug.getSettings().customHosts.join() === "upos-sz-mirrorcos.bilivideo.com,cn-gdfs-ct-01-01.bilivideo.com");
+    assert.equal(await panel.locator("#custom-count").textContent(), "2");
+    assert.equal(await panel.locator(".manual-host span").textContent(), "cn-gdfs-ct-01-01.bilivideo.com");
+    assert.equal(await page.evaluate(() => window.__pageKeys), 0, "keys typed into the panel reached the page");
+    await panel.locator(".manual-host button").click();
+    await page.waitForFunction(() => __biliThreadRipperDebug.getSettings().customHosts.join() === "upos-sz-mirrorcos.bilivideo.com");
+    await page.keyboard.press("Escape");
+    await page.locator(settingsHost).waitFor({ state: "detached" });
+    console.log("PASS 自定义服务器：齿轮菜单打开设置，勾选已知服务器、手动添加和删除，只收 B 站视频服务器，输入不触发播放器快捷键");
 
     // A manager that runs the script outside the page: the accelerator is injected into the
     // page once and the manager's menu entry opens the same settings page.

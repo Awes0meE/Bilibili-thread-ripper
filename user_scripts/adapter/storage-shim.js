@@ -30,20 +30,11 @@ const chrome = (() => {
       catch (error) { console.error("BTR settings listener", error); }
     }
   };
-  const messageListeners = new Set();
+  // No toolbar icon or background page: nothing sends messages here.
   const runtime = {
     lastError: null,
     sendMessage: () => Promise.resolve(),
-    onMessage: { addListener: (listener) => messageListeners.add(listener) },
-    // The settings page asks bridge.js for live status, as the sidebar does in the extension.
-    dispatch(message) {
-      return new Promise((resolve) => {
-        let answered = false;
-        const sendResponse = (response) => { if (!answered) { answered = true; resolve(response); } };
-        for (const listener of messageListeners) listener(message, {}, sendResponse);
-        if (!answered) resolve(undefined);
-      });
-    }
+    onMessage: { addListener() {} }
   };
   // Callers either pass a callback and read runtime.lastError, or await the promise.
   const finish = (value, callback, error = null) => {

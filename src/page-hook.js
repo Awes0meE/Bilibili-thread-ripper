@@ -4,9 +4,6 @@
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
   const INSTALL_FLAG = "__biliThreadRipper0901Installed";
   const BILIBILI_API_ORIGIN = "https://api.bilibili.com";
-  const COMPATIBILITY_RELOAD_KEY = "__btrCompatibilityReloadV1";
-  const COMPATIBILITY_DOCUMENT_ID = root.crypto?.randomUUID?.()
-    || `${Number(root.performance?.timeOrigin || Date.now()).toString(36)}-${Number(root.performance?.now?.() || 0).toString(36)}-${Math.random().toString(36).slice(2)}`;
   const THREAD_OPTIONS = Object.freeze([4, 8, 16, 32, 64, 128]);
   const STATE_LABELS = Object.freeze({ waiting: "正在等视频信息", loading: "正在准备播放", ready: "视频已经准备好了", buffering: "正在补充缓冲", ended: "视频播放完了", error: "播放器出错了", "native-fallback": "已经改回 B 站原来的连接", disabled: "加速已关闭" });
   const KIND_LABELS = Object.freeze({ video: "画面", audio: "声音", meta: "视频信息" });
@@ -16,7 +13,6 @@
 
   const core = root.__BILI_RANGE_CORE__;
   const playerFactory = root.__BILI_NATIVE_MSE_PLAYER_FACTORY__;
-  const earlyMask = root.__BILI_THREAD_RIPPER_EARLY_MASK__;
   const notices = root.__BTR_RUNTIME_NOTICES__;
   if (!core || !playerFactory || typeof root.fetch !== "function") return;
   Object.defineProperty(root, INSTALL_FLAG, { value: true });
@@ -39,6 +35,8 @@
   let playerLifecycle = 0;
   let qualityPlayer = null;
   let syncedQuality = 0;
+  let codecPlayer = null;
+  let syncedCodec = "";
   let infoPanel = null;
   let infoPanelObserver = null;
   const lastHostByKind = { video: "", audio: "" };
@@ -60,14 +58,10 @@
   let autoRetakeRoute = "";
   let autoRetakeCount = 0;
   let autoRetakeAt = 0;
-  let compatibilityReloadTimer = null;
-  let compatibilityReloadRoute = "";
-  let compatibilityReloadTicket = 0;
-  let compatibilityObservedRoute = null;
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.5",
+    version: "0.9.2.0",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -127,14 +121,12 @@
       };
     }
     publish();
-    scheduleCompatibilityFailureReload(route);
   }
 
   // A failed download used to leave the video on Bilibili's own connection until the page
   // changed. Most such failures are one slow CDN reply, so the takeover is tried again a few
-  // times with a growing pause. The compatibility modes reload the page instead.
+  // times with a growing pause.
   function scheduleAutoRetake(route) {
-    if (settings.compatibilityMode !== "off") return;
     const now = Date.now();
     if (autoRetakeRoute !== route || now - autoRetakeAt > 120000) {
       autoRetakeRoute = route;
@@ -152,178 +144,6 @@
       failedRoute = "";
       restartPlayer(true);
     }, 4000 * (2 ** (attempt - 1)));
-  }
-
-  function readCompatibilityReloadState() {
-    try {
-      const parsed = JSON.parse(root.sessionStorage.getItem(COMPATIBILITY_RELOAD_KEY) || "null");
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function writeCompatibilityReloadState(value) {
-    try { root.sessionStorage.setItem(COMPATIBILITY_RELOAD_KEY, JSON.stringify(value)); }
-    catch (_error) {}
-  }
-
-  function clearCompatibilityReloadState() {
-    try { root.sessionStorage.removeItem(COMPATIBILITY_RELOAD_KEY); }
-    catch (_error) {}
-  }
-
-  function cancelCompatibilityReload(clearState = false) {
-    compatibilityReloadTicket += 1;
-    clearTimeout(compatibilityReloadTimer);
-    compatibilityReloadTimer = null;
-    compatibilityReloadRoute = "";
-    if (clearState) clearCompatibilityReloadState();
-  }
-
-  function observeCompatibilityRoute(identity) {
-    const route = identity?.key || "";
-    if (compatibilityObservedRoute === null) {
-      compatibilityObservedRoute = route;
-      return;
-    }
-    if (compatibilityObservedRoute === route) return;
-    compatibilityObservedRoute = route;
-    cancelCompatibilityReload(true);
-  }
-
-  function compatibilityTargetUrl(identity) {
-    const target = new URL(location.href);
-    const pathMatch = /\/video\/(BV[0-9A-Za-z]+|av\d+)/i.exec(target.pathname);
-    const pathId = String(pathMatch?.[1] || "");
-    const targetId = identity.bvid || (identity.aid ? `av${identity.aid}` : "");
-    if (targetId && pathId.toLowerCase() !== targetId.toLowerCase()) {
-      target.pathname = `/video/${targetId}`;
-      target.searchParams.delete("p");
-    }
-    if (identity.part > 1) target.searchParams.set("p", String(identity.part));
-    return target.href;
-  }
-
-  function performCompatibilityReload(identity, route) {
-    if (routeIdentity()?.key !== route) return;
-    const target = compatibilityTargetUrl(identity);
-    if (target !== location.href) root.location.replace(target);
-    else root.location.reload();
-  }
-
-  function scheduleCompatibilityReload(identity, reason) {
-    const compatibilityMode = settings.compatibilityMode || "off";
-    if (!identity || compatibilityMode === "off") return false;
-    const route = identity.key;
-    if (compatibilityReloadTimer && compatibilityReloadRoute === route) return true;
-    cancelCompatibilityReload(false);
-    const previous = readCompatibilityReloadState();
-    const sameAttempt = previous?.mode === compatibilityMode && previous?.route === route;
-    const failures = reason === "failure" ? (sameAttempt ? Number(previous.failures) || 0 : 0) + 1 : 0;
-    writeCompatibilityReloadState({
-      mode: compatibilityMode,
-      route,
-      preflightDone: reason === "failure" ? Boolean(previous?.preflightDone) : false,
-      failures,
-      reason,
-      phase: `${reason}-scheduled`,
-      documentId: COMPATIBILITY_DOCUMENT_ID,
-      updatedAt: Date.now()
-    });
-    compatibilityReloadRoute = route;
-    const ticket = ++compatibilityReloadTicket;
-    const navigationGeneration = routeGeneration;
-    const delay = reason === "preflight" ? 50 : Math.min(5000, 350 * (2 ** Math.min(4, Math.max(0, failures - 1))));
-    notices?.log("兼容模式准备刷新网页", `已开启兼容模式 ${compatibilityMode.toUpperCase()}。${reason === "preflight" ? "播放前会先刷新一次。" : "这次加载失败了，准备刷新后重试。"}\n大约 ${(delay / 1000).toFixed(1)} 秒后刷新。`, "info", "", route, "settings");
-    compatibilityReloadTimer = setTimeout(() => {
-      if (ticket !== compatibilityReloadTicket) return;
-      if (navigationGeneration !== routeGeneration || routeIdentity()?.key !== route) {
-        compatibilityReloadTimer = null;
-        compatibilityReloadRoute = "";
-        const stale = readCompatibilityReloadState();
-        if (stale?.documentId === COMPATIBILITY_DOCUMENT_ID && stale?.phase === `${reason}-scheduled`) clearCompatibilityReloadState();
-        return;
-      }
-      const scheduled = readCompatibilityReloadState();
-      if (scheduled?.mode !== compatibilityMode || scheduled?.route !== route || scheduled?.documentId !== COMPATIBILITY_DOCUMENT_ID || scheduled?.phase !== `${reason}-scheduled`) {
-        compatibilityReloadTimer = null;
-        compatibilityReloadRoute = "";
-        return;
-      }
-      compatibilityReloadTimer = null;
-      compatibilityReloadRoute = "";
-      writeCompatibilityReloadState({
-        ...scheduled,
-        preflightDone: compatibilityMode === "b" ? true : Boolean(scheduled.preflightDone),
-        phase: `${reason}-issued`,
-        updatedAt: Date.now()
-      });
-      performCompatibilityReload(identity, route);
-    }, delay);
-    return true;
-  }
-
-  function ensureCompatibilityPreflight(identity) {
-    const state = readCompatibilityReloadState();
-    if (["a", "b"].includes(settings.compatibilityMode)
-      && state?.mode === settings.compatibilityMode
-      && state?.route === identity.key
-      && state?.documentId === COMPATIBILITY_DOCUMENT_ID
-      && state?.phase === "failure-issued") {
-      if (Date.now() - (Number(state.updatedAt) || 0) < 1500) return true;
-      return scheduleCompatibilityReload(identity, "failure");
-    }
-    if (settings.compatibilityMode !== "b") return false;
-    if (state?.mode === "b" && state?.route === identity.key) {
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-scheduled") return true;
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-issued") {
-        if (Date.now() - (Number(state.updatedAt) || 0) < 1500) return true;
-        return scheduleCompatibilityReload(identity, "preflight");
-      }
-      if (state.documentId !== COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-issued") {
-        writeCompatibilityReloadState({
-          ...state,
-          preflightDone: true,
-          phase: "preflight-consumed",
-          documentId: COMPATIBILITY_DOCUMENT_ID,
-          updatedAt: Date.now()
-        });
-        return false;
-      }
-      if (state.documentId !== COMPATIBILITY_DOCUMENT_ID && state.phase === "failure-issued" && state.preflightDone === true) {
-        writeCompatibilityReloadState({
-          ...state,
-          phase: "failure-consumed",
-          documentId: COMPATIBILITY_DOCUMENT_ID,
-          updatedAt: Date.now()
-        });
-        return false;
-      }
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.preflightDone === true) return false;
-    }
-    return scheduleCompatibilityReload(identity, "preflight");
-  }
-
-  function scheduleCompatibilityFailureReload(route) {
-    if (!settings || !["a", "b"].includes(settings.compatibilityMode)) return;
-    const identity = routeIdentity();
-    if (!identity || identity.key !== route) return;
-    scheduleCompatibilityReload(identity, "failure");
-  }
-
-  function markCompatibilitySuccess(route) {
-    if (compatibilityReloadRoute === route) cancelCompatibilityReload(false);
-    const state = readCompatibilityReloadState();
-    if (!state || state.route !== route || state.mode !== settings.compatibilityMode) return;
-    writeCompatibilityReloadState({
-      ...state,
-      failures: 0,
-      reason: "ready",
-      phase: "ready",
-      documentId: COMPATIBILITY_DOCUMENT_ID,
-      updatedAt: Date.now()
-    });
   }
 
   function transferSpeed(item, now) {
@@ -372,9 +192,10 @@
       let host = "";
       try { host = new URL(event.url).hostname; } catch (_error) {}
       if (settings.debugNotices && settings.debugCategories?.download !== false) notices?.log("开始下载一小段数据", `第 ${id} 条线程正在下载${KIND_LABELS[event.kind] || "画面"}。\n下载节点：${host}`, "info", `range-start-${event.kind}`, undefined, "download");
+      const kind = ["video", "audio", "meta"].includes(event.kind) ? event.kind : "video";
       transfers.set(id, {
         id,
-        kind: ["video", "audio", "meta"].includes(event.kind) ? event.kind : "video",
+        kind,
         host,
         loaded: 0,
         totalBytes: Math.max(0, Number(event.totalBytes) || 0),
@@ -389,8 +210,9 @@
       });
       stats.lastHost = host;
       if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
+      trackBusy(kind, now);
       // One segment starts and ends dozens of transfers within the same moment. Publishing
-      // each of them at once copied the whole thread list to the side panel every time.
+      // each of them at once copied the whole thread list to the extension every time.
       schedulePublish();
       return id;
     }
@@ -406,6 +228,7 @@
       const bytes = Math.max(0, Number(event.bytes) || 0);
       recentBytes.push({ at: now, bytes });
       while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
+      speedMeters[item.kind]?.samples.push({ at: now, bytes });
       item.loaded += bytes;
       item.sampleBytes += bytes;
       item.lastByteAt = now;
@@ -421,12 +244,14 @@
     } else {
       if (event.phase === "cancel") {
         transfers.delete(item.id);
+        trackBusy(item.kind, now);
         schedulePublish();
         return event.id;
       }
       item.state = event.phase === "done" ? "done" : "error";
       item.finalBps = event.phase === "done" ? item.loaded * 1000 / Math.max(1, now - item.startedAt) : 0;
       item.expiresAt = now + 3500;
+      trackBusy(item.kind, now);
       schedulePublish();
     }
     return event.id;
@@ -701,10 +526,11 @@
   // idle connections are closed after a while.
   let preconnectKey = "";
   function preconnectCdnNodes(route) {
-    const key = `${settings.mode}:${route}`;
-    if (preconnectKey === key) return;
     const factory = root.__BILI_CDN_RESOLVER_FACTORY__;
-    const hosts = settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const custom = settings.mode === "custom" ? settings.customHosts : [];
+    const hosts = custom.length ? custom : settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const key = `${settings.mode}:${custom.join(",")}:${route}`;
+    if (preconnectKey === key) return;
     const parent = document.head || document.documentElement;
     if (!Array.isArray(hosts) || !parent) return;
     preconnectKey = key;
@@ -788,25 +614,27 @@
       panel.append(
         settingGroup("线程撕裂者 CDN", "btr-native-mode", [
           { label: "大陆 CDN", value: "mainland" },
-          { label: "海外 CDN", value: "overseas" }
+          { label: "海外 CDN", value: "overseas" },
+          { label: "自定义", value: "custom" }
         ], settings.mode),
-        settingGroup("并发线程", "btr-native-concurrency", THREAD_OPTIONS.map((value) => ({ label: String(value), value })), settings.concurrency),
-        settingGroup("兼容模式", "btr-native-compatibility", [
-          { label: "标准模式", value: "off" },
-          { label: "兼容模式 A", value: "a" },
-          { label: "兼容模式 B", value: "b" }
-        ], settings.compatibilityMode)
+        settingGroup("并发线程", "btr-native-concurrency", THREAD_OPTIONS.map((value) => ({ label: String(value), value })), settings.concurrency)
       );
       panel.addEventListener("change", (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement) || !input.checked) return;
-        if (input.name === "btr-native-mode") {
+        if (input.name === "btr-native-mode" && ["mainland", "overseas", "custom"].includes(input.value)) {
           root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { mode: input.value } }, "*");
         } else if (input.name === "btr-native-concurrency") {
           const concurrency = Number(input.value);
           if (THREAD_OPTIONS.includes(concurrency)) root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { concurrency } }, "*");
-        } else if (input.name === "btr-native-compatibility" && ["off", "a", "b"].includes(input.value)) {
-          root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { compatibilityMode: input.value } }, "*");
+        }
+      });
+      // The servers of the custom mode are picked in the settings panel, so "自定义" opens it,
+      // also when it is already chosen.
+      panel.addEventListener("click", (event) => {
+        const input = event.target;
+        if (input instanceof HTMLInputElement && input.name === "btr-native-mode" && input.value === "custom") {
+          root.postMessage({ channel: CHANNEL, type: "open-settings" }, "*");
         }
       });
       const before = mount.querySelector(".bpx-player-ctrl-setting-others");
@@ -814,7 +642,6 @@
     }
     for (const input of panel.querySelectorAll('input[name="btr-native-mode"]')) input.checked = input.value === settings.mode;
     for (const input of panel.querySelectorAll('input[name="btr-native-concurrency"]')) input.checked = Number(input.value) === settings.concurrency;
-    for (const input of panel.querySelectorAll('input[name="btr-native-compatibility"]')) input.checked = input.value === settings.compatibilityMode;
   }
 
   function scheduleSettingsMenuSync() {
@@ -922,11 +749,71 @@
     });
   }
 
+  // The codec picked in the player's 播放策略 menu. Bilibili stores it as
+  // bilibili_player_codec_prefer_type: "1" HEVC, "2" AVC, "3" AV1, "0" for "默认".
+  function nativeCodec() {
+    try { return { 1: "hevc", 2: "avc", 3: "av1" }[root.localStorage.getItem("bilibili_player_codec_prefer_type")] || ""; }
+    catch (_error) { return ""; }
+  }
+
+  function syncNativeCodec() {
+    const wanted = nativeCodec();
+    if (!player?.setCodec || (codecPlayer === player && syncedCodec === wanted)) return;
+    const current = player, route = playerRoute, lifecycle = playerLifecycle;
+    codecPlayer = current;
+    syncedCodec = wanted;
+    notices?.log("跟随播放器切换编码", wanted ? `正在换成播放策略里选的 ${wanted.toUpperCase()}。` : "播放策略改回了默认，按 AV1、HEVC、AVC 的顺序选。", "info", "", route, "playback");
+    current.setCodec(wanted).catch((error) => {
+      if (lifecycle === playerLifecycle && player === current) recordTakeoverFailure(route, "quality", error, true);
+    });
+  }
+
   function watchQualityMenu(event) {
-    if (!(event.target instanceof Element) || !event.target.closest(".bpx-player-ctrl-quality-menu-item")) return;
+    if (!(event.target instanceof Element)) return;
+    const sync = event.target.closest(".bpx-player-ctrl-quality-menu-item") ? syncNativeQuality
+      : event.target.closest(".bpx-player-ctrl-setting-codec") ? syncNativeCodec : null;
+    if (!sync) return;
     // Capture phase runs before Bilibili's own handler; read the choice once it has run.
-    setTimeout(syncNativeQuality, 0);
-    setTimeout(syncNativeQuality, 300);
+    setTimeout(sync, 0);
+    setTimeout(sync, 300);
+  }
+
+  // Video Speed and Audio Speed in the native panel are how fast the latest data came in
+  // while it was being downloaded, and they keep that value between segments. Here it is
+  // all threads of a kind together over the last few seconds; the pauses between segments
+  // do not count, and the value stays until new data arrives.
+  const SPEED_WINDOW_MS = 3000;
+  const speedMeters = { video: { busySince: 0, spans: [], samples: [], shown: 0 }, audio: { busySince: 0, spans: [], samples: [], shown: 0 } };
+
+  // Measured while data comes in and once more when the downloads stop; the value then stays
+  // as it was instead of fading while the window slides past the last data.
+  function updateSpeed(meter, now) {
+    const from = now - SPEED_WINDOW_MS;
+    meter.spans = meter.spans.filter(([, end]) => end > from);
+    meter.samples = meter.samples.filter((sample) => sample.at > from);
+    const busyMs = meter.spans.reduce((sum, [start, end]) => sum + end - Math.max(start, from), 0)
+      + (meter.busySince ? now - Math.max(meter.busySince, from) : 0);
+    const bytes = meter.samples.reduce((sum, sample) => sum + sample.bytes, 0);
+    // Bytes per millisecond times 8 is kilobits per second.
+    if (bytes > 0 && busyMs >= 250) meter.shown = Math.round(bytes * 8 / busyMs);
+  }
+
+  function trackBusy(kind, now) {
+    const meter = speedMeters[kind];
+    if (!meter) return;
+    const busy = [...transfers.values()].some((item) => item.kind === kind && item.state === "active");
+    if (busy && !meter.busySince) meter.busySince = now;
+    else if (!busy && meter.busySince) {
+      meter.spans.push([meter.busySince, now]);
+      meter.busySince = 0;
+      updateSpeed(meter, now);
+    }
+  }
+
+  function measuredSpeed(kind, now) {
+    const meter = speedMeters[kind];
+    if (meter.busySince) updateSpeed(meter, now);
+    return meter.shown;
   }
 
   // Bilibili's "视频统计信息" panel reads its own player core, which downloads nothing while
@@ -937,22 +824,20 @@
     if (!info?.videoType || playerContainer?.dataset.btrMseActive !== "true") return null;
     const now = Date.now();
     while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
-    const speed = (kind) => Math.round([...transfers.values()]
-      .filter((item) => item.kind === kind && item.state === "active")
-      .reduce((sum, item) => sum + item.bps, 0) * 8 / 1000);
     const track = info.tracks?.find((item) => item.kind === "video");
     const frames = player.video?.getVideoPlaybackQuality?.();
     return {
       "Mime Type": `${info.videoType}, ${info.audioType}`,
-      "Player Type": `线程撕裂者 ${stats.version} 接管`,
+      "Player Type": "BTR Native",
+      "Resolution": info.width && info.height ? `${info.width} x ${info.height}@${Number((Number(info.frameRate) || 0).toFixed(3))}` : undefined,
       "Video DataRate": `${Math.round(info.videoBandwidth / 1000)} Kbps [${String(info.codec).toUpperCase()}]`,
       "Audio DataRate": `${Math.round(info.audioBandwidth / 1000)} Kbps`,
       "Segments": track ? `${track.nextIndex} / ${track.segments}${info.lastSeekMs ? `，跳转恢复 ${(info.lastSeekMs / 1000).toFixed(1)} 秒，之后卡顿 ${info.stallsAfterSeek} 次` : ""}` : undefined,
       "Dropped Frames": frames ? `${frames.droppedVideoFrames} / ${frames.totalVideoFrames}` : undefined,
       "Video Host": lastHostByKind.video || undefined,
       "Audio Host": lastHostByKind.audio || undefined,
-      "Video Speed": `${speed("video")} Kbps`,
-      "Audio Speed": `${speed("audio")} Kbps`,
+      "Video Speed": `${measuredSpeed("video", now)} Kbps`,
+      "Audio Speed": `${measuredSpeed("audio", now)} Kbps`,
       "Network Activity": `${Math.round(recentBytes.reduce((sum, item) => sum + item.bytes, 0) / 1024)} KB`
     };
   }
@@ -984,13 +869,11 @@
       return;
     }
     const identity = routeIdentity();
-    observeCompatibilityRoute(identity);
     if (!settings.enabled || !identity) {
       pendingPodSwitch = null;
       clearTakeoverFailure();
       stats.lastError = "";
       if (player) stopPlayer(true);
-      earlyMask?.release?.();
       return;
     }
     if (pendingPodSwitch) {
@@ -1008,22 +891,9 @@
       clearTakeoverFailure();
       stats.lastError = "";
     }
-    if (ensureCompatibilityPreflight(identity)) {
-      stats.playerState = "waiting";
-      schedulePublish();
-      earlyMask?.release?.();
-      return;
-    }
-    if (!player && failedRoute === route) {
-      earlyMask?.release?.();
-      return;
-    }
-    if (player && playerRoute === route && playerContainer?.isConnected && player.video?.isConnected) {
-      earlyMask?.release?.();
-      return;
-    }
+    if (!player && failedRoute === route) return;
+    if (player && playerRoute === route && playerContainer?.isConnected && player.video?.isConnected) return;
     if (startingRoute === route) return;
-    earlyMask?.arm?.();
     const container = findContainer();
     if (!container) {
       stats.playerState = stats.takeoverError?.route === route ? "error" : "waiting";
@@ -1067,12 +937,15 @@
       cdnBanRoute = route;
     }
     const preferredQuality = nativeQuality();
+    const preferredCodec = nativeCodec();
     const resumeAfterStop = takeResumeHint();
+    for (const meter of Object.values(speedMeters)) meter.shown = 0;
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
         identity,
         preferredQuality,
+        preferredCodec,
         // A collection item is a different video. Its native <video> element
         // can still expose the previous item's currentTime until new metadata
         // arrives, so carrying that value across would clamp short videos to
@@ -1089,10 +962,6 @@
           if (lifecycle !== playerLifecycle) return;
           notices?.log(title, detail, level, "", route, category);
         },
-        onSettingsChange(next) {
-          if (lifecycle !== playerLifecycle) return;
-          root.postMessage({ channel: CHANNEL, type: "settings-update", payload: next }, "*");
-        },
         onNativeSourceChange() {
           if (lifecycle !== playerLifecycle) return;
           notices?.detach("B 站正在切换视频，准备重新接管");
@@ -1105,7 +974,6 @@
             clearTakeoverFailure();
             stats.lastError = "";
           }
-          markCompatibilitySuccess(route);
           stats.acceleratedRequests += 1;
           stats.acceleratedBytes += Number(event.bytes) || 0;
           stats.parallelSubrequests += Number(event.pieces) || 0;
@@ -1120,7 +988,6 @@
             clearTakeoverFailure();
             stats.lastError = "";
           }
-          if (next.playerState === "ready") markCompatibilitySuccess(route);
           stats.quality = next.quality || stats.quality;
           stats.bufferedAhead = Number(next.bufferedAhead) || 0;
           stats.lastError = next.lastError ? String(next.lastError).slice(0, 180) : stats.lastError;
@@ -1142,7 +1009,6 @@
           setTimeout(() => {
             if (lifecycle === playerLifecycle && player && playerRoute === route && stats.playerState === "error") {
               stopPlayer(true);
-              earlyMask?.release?.();
               stats.playerState = "native-fallback";
               publish();
               scheduleAutoRetake(route);
@@ -1160,35 +1026,29 @@
       playerContainer = container;
       qualityPlayer = nextPlayer;
       syncedQuality = preferredQuality;
+      codecPlayer = nextPlayer;
+      syncedCodec = preferredCodec;
       notices?.attach(nextPlayer.video, route, lifecycle, () => lifecycle === playerLifecycle && player === nextPlayer && playerRoute === routeIdentity()?.key && playerContainer?.isConnected && !["error", "native-fallback", "disabled"].includes(stats.playerState));
       if (isPodSwitch) {
         trustedPodVideoKey = identity.videoKey;
         pendingPodSwitch = null;
       }
-      earlyMask?.release?.();
     } catch (error) {
       if (lifecycle !== playerLifecycle) return;
       recordTakeoverFailure(route, "create", error, true);
-      earlyMask?.release?.();
       restartTimer = setTimeout(startPlayer, 2000);
     }
   }
 
   function restartPlayer(force = false) {
     clearTimeout(restartTimer);
-    if (force && compatibilityReloadTimer) cancelCompatibilityReload(true);
     const identity = routeIdentity();
-    if (!force && player && identity?.key === playerRoute && playerContainer?.isConnected && player.video?.isConnected) {
-      earlyMask?.release?.();
-      return;
-    }
+    if (!force && player && identity?.key === playerRoute && playerContainer?.isConnected && player.video?.isConnected) return;
     routeGeneration += 1;
     routeRequestController?.abort();
     routeRequestController = null;
     startingRoute = "";
     failedRoute = "";
-    if (settings.enabled && identity) earlyMask?.arm?.();
-    else earlyMask?.release?.();
     if (player) stopPlayer(false);
     restartTimer = setTimeout(startPlayer, 50);
   }
@@ -1201,23 +1061,28 @@
       settings = core.normalizeSettings(event.data.payload);
       settingsLoaded = true;
       notices?.configure(settings);
-      if (!hadLoadedSettings || previous.enabled !== settings.enabled || previous.mode !== settings.mode || previous.concurrency !== settings.concurrency || previous.compatibilityMode !== settings.compatibilityMode) notices?.log("设置已经生效", `使用${settings.mode === "overseas" ? "海外" : "大陆"} CDN，开启 ${settings.concurrency} 条下载线程。\n当前是${settings.compatibilityMode === "off" ? "标准模式" : `兼容模式 ${settings.compatibilityMode.toUpperCase()}`}。`, "success", "", undefined, "settings");
+      const serversChanged = settings.mode === "custom" && previous.customHosts.join(",") !== settings.customHosts.join(",");
+      if (!hadLoadedSettings || previous.enabled !== settings.enabled || previous.mode !== settings.mode || previous.concurrency !== settings.concurrency || serversChanged) {
+        const cdn = settings.mode === "overseas" ? "海外 CDN"
+          : settings.mode !== "custom" ? "大陆 CDN"
+            : settings.customHosts.length ? `自定义的 ${settings.customHosts.length} 个服务器` : "大陆 CDN（自定义里还没选服务器）";
+        notices?.log("设置已经生效", `使用${cdn}，开启 ${settings.concurrency} 条下载线程。`, "success", "", undefined, "settings");
+      }
       stats.mode = settings.mode;
       syncSettingsMenu();
-      if (settings.compatibilityMode === "off") {
-        cancelCompatibilityReload(true);
-      }
       if (!settings.enabled) {
-        cancelCompatibilityReload(true);
         clearTakeoverFailure();
         stats.lastError = "";
         stopPlayer(true);
       }
-      else if (!previous.enabled || previous.mode !== settings.mode || previous.compatibilityMode !== settings.compatibilityMode) {
-        if (hadLoadedSettings && previous.compatibilityMode !== settings.compatibilityMode) cancelCompatibilityReload(true);
+      else if (!previous.enabled) {
         restartPlayer(true);
       }
       else {
+        // The download lists read the CDN mode and servers for every request, so a new choice
+        // applies to the next downloads. Restarting the player used to send the video back to
+        // its start.
+        if (hadLoadedSettings && (previous.mode !== settings.mode || serversChanged) && playerRoute) preconnectCdnNodes(playerRoute);
         player?.applySettings?.(settings);
         startPlayer();
       }
@@ -1226,7 +1091,6 @@
     } else if (event.data.type === "retry-takeover") {
       clearTimeout(autoRetakeTimer);
       autoRetakeCount = 0;
-      cancelCompatibilityReload(false);
       clearTakeoverFailure();
       stats.lastError = "";
       failedRoute = "";
@@ -1273,7 +1137,10 @@
   setInterval(() => {
     const identity = routeIdentity();
     if (settingsLoaded && settings.enabled && (!player || playerRoute !== identity?.key || !playerContainer?.isConnected || !player.video?.isConnected)) startPlayer();
-    else syncNativeQuality();
+    else {
+      syncNativeQuality();
+      syncNativeCodec();
+    }
     updateNativeInfoPanel();
     syncSettingsMenu();
   }, 1000);
@@ -1292,11 +1159,11 @@
         const { timeline = [], ...rest } = debug;
         // Node names and states only: no download address or account data.
         return JSON.stringify({
-          version: stats.version, at: Math.round(performance.now()), settings: { mode: settings.mode, concurrency: settings.concurrency, compatibilityMode: settings.compatibilityMode },
+          version: stats.version, at: Math.round(performance.now()), settings: { mode: settings.mode, customHosts: settings.customHosts.slice(), concurrency: settings.concurrency, codec: nativeCodec() || "default" },
           state: stats.playerState, player: rest, nodes: stats.cdnHosts.map((item) => ({ ...item })), bannedNodes: cdnBans?.hosts?.() || [], timeline
         }, null, 1);
       },
-      version: "0.9.1.5"
+      version: "0.9.2.0"
     })
   });
   publish();

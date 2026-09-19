@@ -13,11 +13,9 @@ function Add-Source([System.Text.StringBuilder]$builder, [string]$file) {
   [void]$builder.Append("`n/* $file */`n").Append((Read-Source $file)).Append("`n")
 }
 
-# 页面里运行的部分：和扩展同一份代码、同样的顺序，外加扩展侧边栏的设置页。
-$pageFiles = @("user_scripts/adapter/storage-shim.js") + @($manifest.content_scripts | ForEach-Object { $_.js })
+# 页面里运行的部分：和扩展同一份代码、同样的顺序，设置面板也是同一个。两组内容脚本都用到的文件只放一次。
+$pageFiles = @(@("user_scripts/adapter/storage-shim.js") + @($manifest.content_scripts | ForEach-Object { $_.js }) | Select-Object -Unique)
 $sitePatterns = @($manifest.content_scripts | ForEach-Object { $_.matches } | Where-Object { $_ -ne "https://*.bilibili.com/*" } | Select-Object -Unique)
-$popupHtml = [regex]::Match((Read-Source "popup/popup.html"), "(?s)<main>.*</main>").Value
-if (-not $popupHtml) { throw "popup/popup.html 里没有找到 <main>。" }
 
 $header = @(
   "// ==UserScript==",
@@ -51,11 +49,6 @@ $body = New-Object System.Text.StringBuilder
 [void]$body.Append("if (document.documentElement?.hasAttribute(`"data-btr-userscript`")) return;`n")
 [void]$body.Append("document.documentElement?.setAttribute(`"data-btr-userscript`", `"`");`n")
 foreach ($file in $pageFiles) { Add-Source $body $file }
-[void]$body.Append("`n/* popup/popup.html, popup/popup.css */`n")
-[void]$body.Append("const POPUP_HTML = " + (ConvertTo-Json -InputObject $popupHtml -Compress) + ";`n")
-[void]$body.Append("const POPUP_CSS = " + (ConvertTo-Json -InputObject (Read-Source "popup/popup.css") -Compress) + ";`n")
-[void]$body.Append("`n/* popup/popup.js */`nfunction runPopup(document, chrome, window) {`n").Append((Read-Source "popup/popup.js")).Append("`n}`n")
-Add-Source $body "user_scripts/adapter/settings-panel.js"
 [void]$body.Append("}`n")
 Add-Source $body "user_scripts/adapter/loader.js"
 [void]$body.Append("})();`n")

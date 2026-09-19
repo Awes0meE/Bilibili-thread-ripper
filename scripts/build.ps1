@@ -42,7 +42,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "manifest.json") -Destination $ex
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $extensionRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "updates.md") -Destination $extensionRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination $extensionRoot
-foreach ($folder in @("src", "popup", "vendor", "pics")) {
+foreach ($folder in @("src", "pics")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $folder) -Destination $extensionRoot -Recurse
 }
 New-Item -ItemType Directory -Path (Join-Path $extensionRoot "icons") | Out-Null
@@ -55,7 +55,7 @@ New-Item -ItemType Directory -Path $sourceRoot | Out-Null
 foreach ($file in @("manifest.json", "README.md", "updates.md", "LICENSE")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $sourceRoot
 }
-foreach ($folder in @("src", "popup", "icons", "scripts", "vendor", "pics")) {
+foreach ($folder in @("src", "icons", "scripts", "pics")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $folder) -Destination $sourceRoot -Recurse
 }
 $sourceZipPath = Join-Path $distRoot "Bilibili-线程撕裂者-v$version-source.zip"

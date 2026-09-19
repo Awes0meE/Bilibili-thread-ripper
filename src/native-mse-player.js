@@ -47,8 +47,16 @@
     return "other";
   }
 
-  function codecPriority(representation) {
-    return { av1: 3, hevc: 2, avc: 1, other: 0 }[codecFamily(representation)] || 0;
+  function normalizeCodec(value) {
+    return ["av1", "hevc", "avc"].includes(value) ? value : "";
+  }
+
+  // "默认" in the player's 播放策略 menu keeps AV1 > HEVC > AVC. A codec picked there comes
+  // first; a quality that does not have it falls back to that order.
+  function codecPriority(representation, preferredCodec = "") {
+    const family = codecFamily(representation);
+    if (preferredCodec && family === preferredCodec) return 4;
+    return { av1: 3, hevc: 2, avc: 1, other: 0 }[family] || 0;
   }
 
   function qualityLabel(representation) {
@@ -71,17 +79,19 @@
   }
 
   // preferredQuality is the quality chosen in the native menu; 0 is "auto" and keeps the
-  // quality the playinfo itself asks for.
-  function selectRepresentations(playinfo, preferredQuality = 0) {
+  // quality the playinfo itself asks for. preferredCodec is the codec chosen there, "" for
+  // "默认".
+  function selectRepresentations(playinfo, preferredQuality = 0, preferredCodec = "") {
     const body = dashBody(playinfo);
     const dash = body?.dash;
     if (!dash) throw new Error("页面没有 DASH 播放清单");
+    const codec = normalizeCodec(preferredCodec);
     const byQuality = new Map();
     for (const representation of (dash.video || []).filter((item) => supported(item, "video"))) {
       const key = Number(representation.id) || `${Number(representation.height) || 0}-${Math.round(frameRate(representation))}`;
       const existing = byQuality.get(key);
-      if (!existing || codecPriority(representation) > codecPriority(existing) ||
-          (codecPriority(representation) === codecPriority(existing) && (Number(representation.bandwidth) || 0) > (Number(existing.bandwidth) || 0))) {
+      if (!existing || codecPriority(representation, codec) > codecPriority(existing, codec) ||
+          (codecPriority(representation, codec) === codecPriority(existing, codec) && (Number(representation.bandwidth) || 0) > (Number(existing.bandwidth) || 0))) {
         byQuality.set(key, representation);
       }
     }
@@ -186,7 +196,8 @@
     if (!video) throw new Error("没有找到 B 站原生 video 元素");
     let currentPlayinfo = options.playinfo;
     let preferredQuality = Math.max(0, Math.trunc(Number(options.preferredQuality)) || 0);
-    let selection = selectRepresentations(currentPlayinfo, preferredQuality);
+    let preferredCodec = normalizeCodec(options.preferredCodec);
+    let selection = selectRepresentations(currentPlayinfo, preferredQuality, preferredCodec);
     let selectedVideo = selection.preferred;
     let sessionStarts = 0;
     let session = null;
@@ -609,8 +620,8 @@
         forceStartTime: Boolean(playbackState.forceTime),
         internalSeekTarget: null,
         // One ban list per video, shared by every quality and by the audio track.
-        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode, options.cdnBans),
-        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode, options.cdnBans)
+        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode, options.cdnBans, () => core.normalizeSettings(getSettings()).customHosts),
+        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode, options.cdnBans, () => core.normalizeSettings(getSettings()).customHosts)
       };
       session = candidate;
       if (previous) disposeSession(previous, false);
@@ -728,7 +739,7 @@
 
     async function updatePlayinfo(playinfo) {
       if (destroyed) return;
-      const next = selectRepresentations(playinfo, preferredQuality);
+      const next = selectRepresentations(playinfo, preferredQuality, preferredCodec);
       currentPlayinfo = playinfo;
       const nextVideo = next.preferred;
       const audioChanged = !sameRepresentation(selection.audio, next.audio);
@@ -744,6 +755,14 @@
       const wanted = Math.max(0, Math.trunc(Number(quality)) || 0);
       if (destroyed || wanted === preferredQuality) return;
       preferredQuality = wanted;
+      await updatePlayinfo(currentPlayinfo);
+    }
+
+    // The same for the codec picked in the 播放策略 menu.
+    async function setCodec(codec) {
+      const wanted = normalizeCodec(codec);
+      if (destroyed || wanted === preferredCodec) return;
+      preferredCodec = wanted;
       await updatePlayinfo(currentPlayinfo);
     }
 
@@ -806,17 +825,22 @@
     return Object.freeze({
       applySettings() { ensureBuffer(); },
       destroy,
+      setCodec,
       setQuality,
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.5",
+        version: "0.9.2.0",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
         preferredQuality,
+        preferredCodec,
         sessionStarts,
         codec: codecFamily(selectedVideo),
+        width: Number(selectedVideo?.width) || 0,
+        height: Number(selectedVideo?.height) || 0,
+        frameRate: frameRate(selectedVideo),
         videoType: mimeFor(selectedVideo, "video"),
         audioType: mimeFor(selection.audio, "audio"),
         videoBandwidth: Number(selectedVideo?.bandwidth) || 0,

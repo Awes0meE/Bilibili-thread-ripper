@@ -46,7 +46,6 @@
       return { enabled: value?.enabled !== false, mode: value?.mode || "mainland", concurrency: 32 };
     }
   };
-  root.__BILI_THREAD_RIPPER_EARLY_MASK__ = { arm() {}, release() {} };
   let createdOptions = null;
   root.__BILI_NATIVE_MSE_PLAYER_FACTORY__ = {
     createNativePlayer(options) {
@@ -63,6 +62,9 @@
           audioType: 'audio/mp4; codecs="mp4a.40.2"',
           videoBandwidth: 382000,
           audioBandwidth: 111000,
+          width: 1280,
+          height: 720,
+          frameRate: 25,
           tracks: [{ kind: "video", nextIndex: 5, segments: 80 }, { kind: "audio", nextIndex: 6, segments: 80 }]
         }),
         video: container.querySelector("video")
@@ -83,7 +85,8 @@
   (async () => {
     const startedAt = performance.now();
     while (!createdOptions && performance.now() - startedAt < 5000) await wait(25);
-    // BTR downloads a piece of video and a piece of audio from its own nodes.
+    // BTR downloads a piece of video and a piece of audio from its own nodes: 512 KiB and
+    // 128 KiB in about a second, which is some 4000 and 1000 Kbps.
     const videoId = createdOptions.onTransfer({ phase: "start", kind: "video", url: "https://upos-btr-video.bilivideo.com/a-1-100023.m4s", totalBytes: 4 << 20 });
     const audioId = createdOptions.onTransfer({ phase: "start", kind: "audio", url: "https://upos-btr-audio.bilivideo.com/a-1-30280.m4s", totalBytes: 1 << 20 });
     for (let i = 0; i < 8; i += 1) {
@@ -93,21 +96,30 @@
     }
     await wait(250);
     const active = rows();
+    createdOptions.onTransfer({ phase: "done", id: videoId });
+    createdOptions.onTransfer({ phase: "done", id: audioId });
+    // Nothing downloads between segments. As in the native panel the speeds keep their last
+    // value; only Network Activity drops to nothing.
+    await wait(3500);
+    const idle = rows();
     root.__biliThreadRipperDebug.getPlayer().destroy();
     await wait(1500);
     const handedBack = rows();
+    const speed = (values, name) => parseInt(values[name], 10);
     const output = {
       active,
+      idle,
       handedBack,
       checks: {
-        playerType: active["Player Type"] === "线程撕裂者 0.9.1.5 接管",
+        playerType: active["Player Type"] === "BTR Native",
+        resolution: active.Resolution === "1280 x 720@25",
         mime: active["Mime Type"].startsWith('video/mp4; codecs="av01'),
         dataRate: active["Video DataRate"] === "382 Kbps [AV1]" && active["Audio DataRate"] === "111 Kbps",
         segments: active.Segments === "5 / 80",
         hosts: active["Video Host"] === "upos-btr-video.bilivideo.com" && active["Audio Host"] === "upos-btr-audio.bilivideo.com",
-        speeds: parseInt(active["Video Speed"], 10) > 0 && parseInt(active["Audio Speed"], 10) > 0,
+        speeds: speed(active, "Video Speed") >= 2500 && speed(active, "Video Speed") <= 8000 && speed(active, "Audio Speed") >= 600 && speed(active, "Audio Speed") <= 2000,
         activity: parseInt(active["Network Activity"], 10) > 0,
-        resolutionLeftAlone: active.Resolution === NATIVE.Resolution,
+        speedsHeldWhenIdle: speed(idle, "Video Speed") >= 2500 && speed(idle, "Audio Speed") >= 600 && idle["Network Activity"] === "0 KB",
         nativeValuesAfterHandBack: JSON.stringify(handedBack) === JSON.stringify(NATIVE)
       }
     };

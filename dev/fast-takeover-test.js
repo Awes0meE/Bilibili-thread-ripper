@@ -13,6 +13,7 @@
   let nativeAnsweredAt = 0;
   let overseasLinks = null;
   let mainlandLinks = null;
+  let keptPlayer = null;
   let burst = null;
 
   history.replaceState(null, "", `/video/${OLD_BVID}`);
@@ -20,7 +21,7 @@
   root.__playinfo__ = { data: { dash: { duration: 100, video: [], audio: [] }, marker: `page:${OLD_BVID}` } };
   root.__BILI_RANGE_CORE__ = {
     normalizeSettings(value) {
-      return { enabled: value?.enabled !== false, mode: value?.mode || "mainland", compatibilityMode: "off", concurrency: 32 };
+      return { enabled: value?.enabled !== false, mode: value?.mode || "mainland", customHosts: [], concurrency: 32 };
     }
   };
   root.__BILI_CDN_RESOLVER_FACTORY__ = { MAINLAND_HOSTS, OVERSEAS_HOSTS, createBanList: () => null };
@@ -76,6 +77,7 @@
       takeoverDelayMs: newCall && nativeAnsweredAt ? Math.round(newCall.at - nativeAnsweredAt) : null,
       overseasLinks,
       mainlandLinks,
+      keptPlayer,
       burst
     };
     const expectedLinks = (hosts) => JSON.stringify(hosts.map((host) => ({ href: `https://${host}/`, crossOrigin: "anonymous" })));
@@ -87,7 +89,7 @@
     output.burstThrottled = Boolean(burst) && burst.messages <= 4;
     output.burstCounted = Boolean(burst) && burst.activeAfterStarts === 40 && burst.activeAfterDone === 0;
     output.pass = output.usedNativeAnswer && output.skippedOwnPlayurl && output.tookOverAtOnce
-      && output.preconnectedOverseas && output.preconnectedMainland && output.burstThrottled && output.burstCounted;
+      && output.preconnectedOverseas && output.preconnectedMainland && keptPlayer === true && output.burstThrottled && output.burstCounted;
     result.textContent = JSON.stringify(output);
     if (burst && mainlandLinks) result.dataset.pass = String(output.pass);
   }
@@ -114,9 +116,13 @@
     await sleep(250);
     burst = { messages: statsMessages.length - before, activeAfterStarts, activeAfterDone: lastStats().activeThreads };
 
+    // Another CDN applies to the next downloads: its nodes are connected to at once, and the
+    // playing video is not taken over again (that used to send it back to its start).
     root.postMessage({ channel: CHANNEL, type: "settings", payload: { enabled: true, mode: "mainland", concurrency: 32 } }, "*");
-    await until(() => calls.length === 3);
+    await until(() => preconnectLinks().some((link) => link.href.includes("mainland")));
+    await sleep(300);
     mainlandLinks = preconnectLinks();
+    keptPlayer = calls.length === 2;
     render();
   }, { once: true });
   setInterval(render, 100);

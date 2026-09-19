@@ -37,8 +37,18 @@ function mockChrome() {
   const mark = name => { passed.push(name); console.log("PASS " + name); };
   const origin = "http://127.0.0.1:18763";
   const activeSelector = "#__btr_notification_stack__ .debug:not(.leaving)";
+  // The settings panel opens inside a bilibili page. This tab is one without a video; the
+  // page reports 3 threads in use.
+  const openSettings = async (tab, navigate = true) => {
+    if (navigate) await tab.goto(origin + "/dev/notification-home-test.html");
+    await tab.evaluate(() => {
+      window.postMessage({ channel: "__BILI_RANGE_ACCELERATOR_V1__", type: "stats", payload: { activeThreads: 3 } }, "*");
+      setTimeout(() => document.dispatchEvent(new CustomEvent("btr-userscript-open-settings")), 50);
+    });
+    await tab.locator("#__bilibili_thread_ripper_settings__ .btr-popup").waitFor();
+  };
   try {
-    assert.equal(manifest.version, "0.9.1.5");
+    assert.equal(manifest.version, "0.9.2.0");
     assert.deepEqual(manifest.content_scripts.find(item => item.world === "ISOLATED").matches, ["https://*.bilibili.com/*"]);
     assert.deepEqual(manifest.content_scripts.find(item => item.world === "MAIN").matches, ["https://www.bilibili.com/*", "https://m.bilibili.com/*"]);
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -52,7 +62,7 @@ function mockChrome() {
     await home.goto(origin + "/dev/notification-home-test.html");
     await home.evaluate(() => chrome.storage.sync.set({ statusNotice: true }));
     await page.goto(url);
-    await popup.goto(origin + "/popup/popup.html");
+    await openSettings(popup);
     await page.waitForFunction(() => __biliThreadRipperDebug.getPlayer());
     await page.waitForTimeout(1100);
     assert.equal(await mode.count(), 0);
@@ -63,7 +73,7 @@ function mockChrome() {
     assert.equal(await popup.locator("#active-count").innerText(), "3");
     assert.equal(await page.evaluate(async () => "statusNotice" in await chrome.storage.sync.get(null)), false);
     assert.equal(await page.locator("#__bilibili_thread_ripper_watermark__").count(), 0);
-    mark("保持 0.9.1.5，移除旧开关与监控面板，迁移不擅自开启 Debug");
+    mark("保持 0.9.2.0，移除旧开关与监控面板，迁移不擅自开启 Debug");
 
     // Red messages are off by default since 0.9.1.2. The rest of this test covers them too.
     assert.equal(await popup.locator("#error-notices").isChecked(), false);
@@ -155,8 +165,9 @@ function mockChrome() {
     await home.reload();
     await homeMode.waitFor({ state: "visible" });
     await popup.reload();
-    await popup.waitForFunction(() => document.getElementById("debug-notices").checked);
-    mark("避让原有错误提示框，页面重载与侧栏重开保留 Debug 设置");
+    await openSettings(popup, false);
+    await popup.waitForFunction(() => document.getElementById("__bilibili_thread_ripper_settings__")?.shadowRoot?.getElementById("debug-notices")?.checked);
+    mark("避让原有错误提示框，页面重载与设置面板重开保留 Debug 设置");
 
     await page.evaluate(() => {
       window.oldNoticeVideo = __biliThreadRipperDebug.getPlayer().video;

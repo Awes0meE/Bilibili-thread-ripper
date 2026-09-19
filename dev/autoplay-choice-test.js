@@ -17,7 +17,6 @@
       return { enabled: value?.enabled !== false, mode: value?.mode || "mainland", concurrency: 32 };
     }
   };
-  root.__BILI_THREAD_RIPPER_EARLY_MASK__ = { arm() {}, release() {} };
   root.__BILI_NATIVE_MSE_PLAYER_FACTORY__ = {
     createNativePlayer(options) {
       created.push({ initialResume: options.initialResume, autoplay: options.autoplay });
@@ -67,7 +66,7 @@
         settingOnIsPassed: settingOn?.autoplay === true
       }
     };
-    output.pass = Object.values(output.checks).every(Boolean) && root.__biliThreadRipperDebug?.version === "0.9.1.5";
+    output.pass = Object.values(output.checks).every(Boolean) && root.__biliThreadRipperDebug?.version === "0.9.2.0";
     result.textContent = JSON.stringify(output);
     result.dataset.pass = String(output.pass);
   })();

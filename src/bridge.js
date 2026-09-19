@@ -2,7 +2,7 @@
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.5";
+  const VERSION = "0.9.2.0";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -11,19 +11,9 @@
   const ONBOARDING_STORAGE_KEY = "btrOnboardingRevision";
   const ONBOARDING_REVISION = "native-progressive-mse-v1";
   const THREAD_OPTIONS = Object.freeze([4, 8, 16, 32, 64, 128]);
-  const DEFAULT_DANMAKU = Object.freeze({
-    visible: true,
-    opacity: 0.9,
-    area: "threeQuarter",
-    fontSize: 25,
-    speed: 5,
-    modes: [0, 1, 2],
-    antiOverlap: true,
-    synchronousPlayback: true,
-    mode: 0,
-    color: "#FFFFFF"
-  });
-  const DEFAULTS = { enabled: true, concurrency: 8, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: false, debugCategories: {}, subtitleLanguage: "off", subtitleLastLanguage: "" };
+  const DEFAULTS = { enabled: true, concurrency: 8, mode: "mainland", customHosts: [], debugNotices: false, errorNotices: false, debugCategories: {} };
+  // Settings of the old ArtPlayer version and of the removed compatibility modes.
+  const RETIRED_KEYS = ["statusNotice", "compatibilityMode", "volume", "danmaku", "danmakuFontSize", "subtitleLanguage", "subtitleLastLanguage"];
   let latestSettings = { ...DEFAULTS };
   let latestStats = null;
   let loaded = false;
@@ -64,12 +54,6 @@
       #${ONBOARDING_ID} .btr-onboarding-mode input:focus-visible+.btr-onboarding-mode-body{outline:2px solid #00aeec!important;outline-offset:2px!important}
       #${ONBOARDING_ID} .btr-onboarding-mode-name{display:block!important;margin:0 0 5px!important;font-size:14px!important;line-height:20px!important;font-weight:600!important}
       #${ONBOARDING_ID} .btr-onboarding-mode-note{display:block!important;color:#9499a0!important;font-size:12px!important;line-height:18px!important;font-weight:400!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat-list{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:8px!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat{position:relative!important;display:block!important;cursor:pointer!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input{position:absolute!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat-label{display:flex!important;align-items:center!important;justify-content:center!important;min-height:38px!important;padding:8px!important;border:1px solid #dcdfe3!important;border-radius:6px!important;background:#fff!important;color:#61666d!important;font-size:13px!important;line-height:20px!important;font-weight:500!important;text-align:center!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input:checked+.btr-onboarding-compat-label{border-color:#fb7299!important;background:#fff1f5!important;color:#18191c!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input:focus-visible+.btr-onboarding-compat-label{outline:2px solid #00aeec!important;outline-offset:2px!important}
       #${ONBOARDING_ID} .btr-onboarding-thread-head{display:flex!important;align-items:center!important;justify-content:space-between!important;margin:0 0 6px!important}
       #${ONBOARDING_ID} .btr-onboarding-thread-value{color:#fb7299!important;font-size:22px!important;line-height:28px!important;font-weight:700!important;font-variant-numeric:tabular-nums!important}
       #${ONBOARDING_ID} input[type="range"]{display:block!important;width:100%!important;height:24px!important;margin:0!important;accent-color:#fb7299!important;cursor:pointer!important}
@@ -137,31 +121,6 @@
     }
     modeFieldset.append(modeLegend, modeList);
 
-    const compatibilityFieldset = document.createElement("fieldset");
-    const compatibilityLegend = document.createElement("legend");
-    compatibilityLegend.textContent = "兼容模式";
-    const compatibilityList = document.createElement("div");
-    compatibilityList.className = "btr-onboarding-compat-list";
-    for (const option of [
-      { value: "off", name: "标准模式" },
-      { value: "a", name: "兼容模式 A" },
-      { value: "b", name: "兼容模式 B" }
-    ]) {
-      const label = document.createElement("label");
-      label.className = "btr-onboarding-compat";
-      const input = document.createElement("input");
-      input.type = "radio";
-      input.name = "btr-onboarding-compatibility";
-      input.value = option.value;
-      input.checked = option.value === latestSettings.compatibilityMode;
-      const text = document.createElement("span");
-      text.className = "btr-onboarding-compat-label";
-      text.textContent = option.name;
-      label.append(input, text);
-      compatibilityList.append(label);
-    }
-    compatibilityFieldset.append(compatibilityLegend, compatibilityList);
-
     const threadFieldset = document.createElement("fieldset");
     const threadHead = document.createElement("div");
     threadHead.className = "btr-onboarding-thread-head";
@@ -206,13 +165,11 @@
     status.setAttribute("aria-live", "polite");
     save.addEventListener("click", () => {
       const mode = panel.querySelector('input[name="btr-onboarding-mode"]:checked')?.value === "overseas" ? "overseas" : "mainland";
-      const compatibilityValue = panel.querySelector('input[name="btr-onboarding-compatibility"]:checked')?.value;
-      const compatibilityMode = ["a", "b"].includes(compatibilityValue) ? compatibilityValue : "off";
       const concurrency = THREAD_OPTIONS[Number(threadRange.value)] || 8;
       save.disabled = true;
       save.textContent = "正在保存…";
-      latestSettings = normalizeStoredSettings({ ...latestSettings, enabled: true, mode, compatibilityMode, concurrency });
-      chrome.storage.sync.set({ enabled: true, mode, compatibilityMode, concurrency }, () => {
+      latestSettings = normalizeStoredSettings({ ...latestSettings, enabled: true, mode, concurrency });
+      chrome.storage.sync.set({ enabled: true, mode, concurrency }, () => {
         if (chrome.runtime.lastError) {
           status.textContent = `保存失败：${chrome.runtime.lastError.message}`;
           save.disabled = false;
@@ -235,7 +192,7 @@
       });
     });
 
-    panel.append(heading, lead, modeFieldset, compatibilityFieldset, threadFieldset, tip, save, status);
+    panel.append(heading, lead, modeFieldset, threadFieldset, tip, save, status);
     overlay.append(panel);
     mount.append(overlay);
     save.focus({ preventScroll: true });
@@ -250,50 +207,21 @@
     });
   }
 
-  function normalizeDanmaku(input, legacyFontSize) {
-    const source = input && typeof input === "object" ? input : {};
-    const allowedAreas = ["quarter", "half", "threeQuarter", "full"];
-    const allowedSpeeds = [1, 2.5, 5, 7.5, 10];
-    const requestedSpeed = Number(source.speed);
-    const requestedModes = Array.isArray(source.modes)
-      ? [...new Set(source.modes.map(Number).filter((value) => [0, 1, 2].includes(value)))]
-      : [0, 1, 2];
-    const requestedColor = String(source.color || "").toUpperCase();
-    return {
-      visible: source.visible !== false,
-      opacity: Math.max(0, Math.min(1, Number.isFinite(Number(source.opacity)) ? Number(source.opacity) : 0.9)),
-      area: allowedAreas.includes(source.area) ? source.area : "threeQuarter",
-      fontSize: Math.max(12, Math.min(64, Math.round(Number(source.fontSize ?? legacyFontSize) || 25))),
-      speed: allowedSpeeds.includes(requestedSpeed) ? requestedSpeed : 5,
-      modes: requestedModes,
-      antiOverlap: source.antiOverlap !== false,
-      synchronousPlayback: source.synchronousPlayback !== false,
-      mode: [0, 1, 2].includes(Number(source.mode)) ? Number(source.mode) : 0,
-      color: /^#[0-9A-F]{6}$/.test(requestedColor) ? requestedColor : "#FFFFFF"
-    };
-  }
-
+  // The page checks each custom server again with the full rules before using it; here it
+  // only has to look like a host name.
   function normalizeStoredSettings(input) {
-    const allowedThreads = [4, 8, 16, 32, 64, 128];
-    const requested = Math.trunc(Number(input?.concurrency));
-    const requestedVolume = Number(input?.volume);
+    const threads = Math.trunc(Number(input?.concurrency));
     return {
       enabled: input?.enabled !== false,
-      concurrency: allowedThreads.includes(requested) ? requested : 8,
-      volume: Number.isFinite(requestedVolume) ? Math.max(0, Math.min(1, requestedVolume)) : 0.7,
-      danmaku: normalizeDanmaku(input?.danmaku, input?.danmakuFontSize),
-      mode: input?.mode === "overseas" ? "overseas" : "mainland",
-      compatibilityMode: ["a", "b"].includes(input?.compatibilityMode) ? input.compatibilityMode : "off",
+      concurrency: THREAD_OPTIONS.includes(threads) ? threads : 8,
+      mode: ["overseas", "custom"].includes(input?.mode) ? input.mode : "mainland",
+      customHosts: (Array.isArray(input?.customHosts) ? input.customHosts : [])
+        .map((host) => String(host).trim().toLowerCase())
+        .filter((host, index, all) => /^[a-z\d](?:[a-z\d.-]{0,251}[a-z\d])?$/.test(host) && all.indexOf(host) === index)
+        .slice(0, 32),
       debugNotices: input?.debugNotices === true,
       errorNotices: input?.errorNotices === true,
-      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false])),
-      subtitleLanguage: /^[\w-]+$/i.test(String(input?.subtitleLanguage || "off"))
-        ? String(input.subtitleLanguage).slice(0, 48)
-        : "off",
-      subtitleLastLanguage: /^[\w-]+$/i.test(String(input?.subtitleLastLanguage || ""))
-        && String(input.subtitleLastLanguage).toLowerCase() !== "off"
-        ? String(input.subtitleLastLanguage).slice(0, 48)
-        : ""
+      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false]))
     };
   }
 
@@ -464,26 +392,11 @@
   }
 
   chrome.storage.sync.get(null, (stored) => {
-    const migrated = { ...DEFAULTS, ...stored };
-    if (!stored.danmaku && stored.danmakuFontSize !== undefined) {
-      migrated.danmaku = { ...DEFAULT_DANMAKU, fontSize: stored.danmakuFontSize };
-    }
-    latestSettings = normalizeStoredSettings(migrated);
-    if (Object.prototype.hasOwnProperty.call(stored, "statusNotice")) chrome.storage.sync.remove("statusNotice");
-    if (JSON.stringify(stored.debugCategories) !== JSON.stringify(latestSettings.debugCategories) || stored.errorNotices !== latestSettings.errorNotices || stored.debugNotices !== latestSettings.debugNotices || stored.mode !== latestSettings.mode || stored.compatibilityMode !== latestSettings.compatibilityMode || stored.concurrency !== latestSettings.concurrency || stored.volume !== latestSettings.volume || stored.subtitleLanguage !== latestSettings.subtitleLanguage || stored.subtitleLastLanguage !== latestSettings.subtitleLastLanguage || JSON.stringify(stored.danmaku) !== JSON.stringify(latestSettings.danmaku)) {
-      chrome.storage.sync.set({
-        mode: latestSettings.mode,
-        compatibilityMode: latestSettings.compatibilityMode,
-        debugNotices: latestSettings.debugNotices,
-        errorNotices: latestSettings.errorNotices,
-        debugCategories: latestSettings.debugCategories,
-        concurrency: latestSettings.concurrency,
-        volume: latestSettings.volume,
-        subtitleLanguage: latestSettings.subtitleLanguage,
-        subtitleLastLanguage: latestSettings.subtitleLastLanguage,
-        danmaku: latestSettings.danmaku
-      });
-    }
+    latestSettings = normalizeStoredSettings({ ...DEFAULTS, ...stored });
+    const retired = RETIRED_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(stored, key));
+    if (retired.length) chrome.storage.sync.remove(retired);
+    const changed = Object.keys(DEFAULTS).filter((key) => JSON.stringify(stored[key]) !== JSON.stringify(latestSettings[key]));
+    if (changed.length) chrome.storage.sync.set(Object.fromEntries(changed.map((key) => [key, latestSettings[key]])));
     loaded = true;
     notices?.configure(latestSettings);
     syncTakeoverErrorNotice();
@@ -515,51 +428,18 @@
       notices?.logs(event.data.payload);
       return;
     }
-    if (event.data.type === "danmaku-request") {
-      const requestId = String(event.data.requestId || "").slice(0, 100);
-      const cid = Number(event.data.cid);
-      if (!requestId || !Number.isSafeInteger(cid) || cid <= 0) return;
-      chrome.runtime.sendMessage({ type: "fetchDanmakuXml", cid }).then(
-        (payload) => window.postMessage({ channel: CHANNEL, type: "danmaku-response", requestId, payload }, "*"),
-        (error) => window.postMessage({
-          channel: CHANNEL,
-          type: "danmaku-response",
-          requestId,
-          payload: { ok: false, error: String(error?.message || error).slice(0, 180) }
-        }, "*")
-      );
-      return;
-    }
-    if (event.data.type === "subtitle-request") {
-      const requestId = String(event.data.requestId || "").slice(0, 100);
-      const url = String(event.data.url || "").slice(0, 4096);
-      if (!requestId || !url) return;
-      chrome.runtime.sendMessage({ type: "fetchSubtitleText", url }).then(
-        (payload) => window.postMessage({ channel: CHANNEL, type: "subtitle-response", requestId, payload }, "*"),
-        (error) => window.postMessage({
-          channel: CHANNEL,
-          type: "subtitle-response",
-          requestId,
-          payload: { ok: false, error: String(error?.message || error).slice(0, 180) }
-        }, "*")
-      );
+    // The settings panel and the player's gear menu save through here.
+    if (event.data.type === "get-settings") {
+      if (loaded) postSettings();
       return;
     }
     if (event.data.type === "settings-update") {
       const input = event.data.payload;
       if (!input || typeof input !== "object") return;
-      const update = {};
-      if (input.mode === "mainland" || input.mode === "overseas") update.mode = input.mode;
-      if (["off", "a", "b"].includes(input.compatibilityMode)) update.compatibilityMode = input.compatibilityMode;
-      const concurrency = Math.trunc(Number(input.concurrency));
-      if ([4, 8, 16, 32, 64, 128].includes(concurrency)) update.concurrency = concurrency;
-      const volume = Number(input.volume);
-      if (Number.isFinite(volume)) update.volume = Math.max(0, Math.min(1, volume));
-      if (input.danmaku && typeof input.danmaku === "object") update.danmaku = normalizeDanmaku(input.danmaku);
-      if (/^[\w-]+$/i.test(String(input.subtitleLanguage || ""))) update.subtitleLanguage = String(input.subtitleLanguage).slice(0, 48);
-      if (input.subtitleLastLanguage === "") update.subtitleLastLanguage = "";
-      else if (/^[\w-]+$/i.test(String(input.subtitleLastLanguage || "")) && String(input.subtitleLastLanguage).toLowerCase() !== "off") update.subtitleLastLanguage = String(input.subtitleLastLanguage).slice(0, 48);
-      if (Object.keys(update).length) chrome.storage.sync.set(update);
+      const keys = Object.keys(DEFAULTS).filter((key) => Object.prototype.hasOwnProperty.call(input, key));
+      if (!keys.length) return;
+      const next = normalizeStoredSettings({ ...latestSettings, ...Object.fromEntries(keys.map((key) => [key, input[key]])) });
+      chrome.storage.sync.set(Object.fromEntries(keys.map((key) => [key, next[key]])));
       return;
     }
     if (event.data.type !== "stats") return;
@@ -568,7 +448,7 @@
     latestStats = {
       version: String(input.version || ""),
       architecture: String(input.architecture || ""),
-      mode: input.mode === "overseas" ? "overseas" : "mainland",
+      mode: ["overseas", "custom"].includes(input.mode) ? input.mode : "mainland",
       playerState: String(input.playerState || "waiting").slice(0, 32),
       quality: String(input.quality || "").slice(0, 24),
       bufferedAhead: Math.max(0, Number(input.bufferedAhead) || 0),
@@ -581,7 +461,7 @@
       healthyCdns: Math.max(0, Number(input.healthyCdns) || 0),
       blockedCdns: Math.max(0, Number(input.blockedCdns) || 0),
       lastHost: String(input.lastHost || "").slice(0, 120),
-      lastError: String(input.lastError || "").replace(/[\u00b7\u2022\u2027\u2219\u22c5]+/g, "，").slice(0, 180),
+      lastError: String(input.lastError || "").replace(/[·•‧∙⋅]+/g, "，").slice(0, 180),
       takeoverError: normalizeTakeoverError(input.takeoverError),
       cdnHosts: Array.isArray(input.cdnHosts) ? input.cdnHosts.slice(0, 32).map((item) => ({
         host: String(item?.host || "").slice(0, 120),
@@ -602,10 +482,9 @@
     syncTakeoverErrorNotice();
   });
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type !== "getStatus") return false;
-    window.postMessage({ channel: CHANNEL, type: "get-stats" }, "*");
-    sendResponse({ settings: latestSettings, stats: latestStats });
+  // The toolbar icon of the extension. The settings panel runs in the page.
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "openSettings" && window.top === window) window.postMessage({ channel: CHANNEL, type: "open-settings", payload: { toggle: true } }, "*");
     return false;
   });
 })();

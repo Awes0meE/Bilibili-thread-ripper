@@ -18,7 +18,6 @@
       return { enabled: value?.enabled !== false, mode: value?.mode || "mainland", concurrency: 32 };
     }
   };
-  root.__BILI_THREAD_RIPPER_EARLY_MASK__ = { arm() {}, release() {} };
   // The native player: its menu sets newQ, like Bilibili's own click handler.
   root.player = { getQuality: () => ({ nowQ: 0, newQ: nativeQuality, realQ: 16 }) };
   for (const item of document.querySelectorAll(".bpx-player-ctrl-quality-menu-item")) {
@@ -86,7 +85,7 @@
       && output.steps.changeWithoutClick
       && output.steps.backToAuto
       && output.steps.onePlayer
-      && root.__biliThreadRipperDebug?.version === "0.9.1.5";
+      && root.__biliThreadRipperDebug?.version === "0.9.2.0";
     render();
     result.dataset.pass = String(output.pass);
   })();

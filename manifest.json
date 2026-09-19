@@ -2,32 +2,23 @@
   "manifest_version": 3,
   "name": "Bilibili 线程撕裂者",
   "short_name": "线程撕裂者",
-  "version": "0.9.1.5",
+  "version": "0.9.2.0",
   "description": "保留哔哩哔哩原生播放器，通过多 CDN、多 Range 并发下载改善视频缓冲速度。",
   "minimum_chrome_version": "114",
   "permissions": [
-    "storage",
-    "sidePanel"
-  ],
-  "host_permissions": [
-    "https://comment.bilibili.com/*",
-    "https://api.bilibili.com/*",
-    "https://*.hdslb.com/*"
+    "storage"
   ],
   "background": {
     "service_worker": "src/service-worker.js"
   },
   "action": {
-    "default_title": "打开 Bilibili 线程撕裂者侧边栏",
+    "default_title": "线程撕裂者设置（在 B 站页面上点击）",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
       "48": "icons/icon-48.png",
       "128": "icons/icon-128.png"
     }
-  },
-  "side_panel": {
-    "default_path": "popup/popup.html"
   },
   "icons": {
     "16": "icons/icon-16.png",
@@ -48,6 +39,7 @@
         "src/idm-downloader.js",
         "src/native-mse-player.js",
         "src/runtime-notices.js",
+        "src/settings-panel.js",
         "src/page-hook.js"
       ],
       "run_at": "document_start",

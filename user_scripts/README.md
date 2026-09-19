@@ -5,4 +5,4 @@
 设置：点油猴图标 → 线程撕裂者设置
 
 - `bilibili-thread-ripper.user.js`：脚本本体，由 `scripts/build-userscript.ps1` 生成，别手改
-- `adapter/`：让扩展代码能在油猴里跑的三个小文件（存设置、设置页、启动）
+- `adapter/`：让扩展代码能在油猴里跑的两个小文件（存设置、启动）。设置面板和扩展是同一份代码

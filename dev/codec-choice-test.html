@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>BTR 播放策略测试</title>
+</head>
+<body>
+  <div id="bilibili-player"><div class="bpx-player-container" style="width:960px;height:540px"><video></video><div class="bpx-player-ctrl-setting-menu-right"><div class="bpx-player-ctrl-setting-codec">播放策略</div><div class="bpx-player-ctrl-setting-others">其他设置</div></div></div></div>
+  <pre id="codec-choice-result">starting</pre>
+  <script>
+    // Every codec counts as playable here, so only the choice rules decide.
+    MediaSource.isTypeSupported = () => true;
+    // The player's 播放策略 menu is set to AVC before the page loads.
+    localStorage.setItem("bilibili_player_codec_prefer_type", "2");
+  </script>
+  <script src="/src/range-core.js"></script>
+  <script src="/src/cdn-resolver.js"></script>
+  <script src="/src/sidx.js"></script>
+  <script src="/src/idm-downloader.js"></script>
+  <script src="/src/native-mse-player.js"></script>
+  <script src="/dev/codec-choice-test.js"></script>
+  <script src="/src/page-hook.js"></script>
+</body>
+</html>

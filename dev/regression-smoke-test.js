@@ -9,16 +9,14 @@ const { chromium } = require("playwright");
     ["multipart-navigation-test.html", "multipart-navigation-result"],
     ["takeover-error-test.html", "takeover-error-result"],
     ["error-notice-test.html", "error-notice-result"],
-    ["compatibility-mode-test.html?mode=a", "compatibility-result"],
-    ["compatibility-mode-test.html?mode=b", "compatibility-result"],
-    ["compatibility-navigation-test.html", "compatibility-navigation-result"],
     ["onboarding-test.html", "result"],
     ["mse-abort-test.html", "mse-abort-result"],
     ["quality-sync-test.html", "quality-sync-result"],
     ["info-panel-test.html", "info-panel-result"],
     ["fast-takeover-test.html", "fast-takeover-result"],
     ["buffer-window-test.html", "buffer-window-result"],
-    ["autoplay-choice-test.html", "autoplay-choice-result"]
+    ["autoplay-choice-test.html", "autoplay-choice-result"],
+    ["codec-choice-test.html", "codec-choice-result"]
   ];
   try {
     for (let offset = 0; offset < tests.length; offset += 3) {

@@ -27,6 +27,12 @@ function mockChrome() {
   const browser = await chromium.launch({ executablePath: process.env.BTR_CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", headless: true, args: ["--disable-background-timer-throttling"] });
   const errors = [];
   const origin = "http://127.0.0.1:18763";
+  // The settings panel opens inside a bilibili page; this tab is one without a video.
+  const openSettings = async (tab, navigate = true) => {
+    if (navigate) await tab.goto(origin + "/dev/notification-home-test.html");
+    await tab.evaluate(() => setTimeout(() => document.dispatchEvent(new CustomEvent("btr-userscript-open-settings")), 50));
+    await tab.locator("#__bilibili_thread_ripper_settings__ .btr-popup").waitFor();
+  };
   const red = '.bubble[data-level="error"]:not(.leaving)';
   try {
     const context = await browser.newContext({ viewport: { width: 640, height: 900 } });
@@ -35,7 +41,7 @@ function mockChrome() {
     for (const tab of [page, popup, home]) tab.on("pageerror", error => errors.push(error.message));
     await popup.setViewportSize({ width: 410, height: 900 });
     await page.goto(origin + "/dev/notification-test.html");
-    await popup.goto(origin + "/popup/popup.html");
+    await openSettings(popup);
     await page.waitForFunction(() => __biliThreadRipperDebug.getPlayer());
     assert.equal(await popup.locator("#error-notices").isChecked(), false);
     assert.equal(await popup.locator("#debug-notices").isChecked(), false);
@@ -101,6 +107,7 @@ function mockChrome() {
     await home.locator("#__bilibili_thread_ripper_error_notice__").waitFor({ state: "detached" });
     await page.goto(origin + "/dev/notification-test.html");
     await popup.reload();
+    await openSettings(popup, false);
     await page.waitForFunction(() => __biliThreadRipperDebug.getPlayer());
     assert.equal(await popup.locator("#error-notices").isChecked(), false);
     assert.equal(await page.evaluate(() => __biliThreadRipperDebug.getSettings().errorNotices), false);
@@ -115,7 +122,7 @@ function mockChrome() {
     assert.equal(await page.locator('.bubble:not([data-level="error"])').count(), 0);
     assert.equal(await page.locator(red).count(), 1);
     await popup.screenshot({ path: "dist/error-switch-preview.png" });
-    console.log("PASS 原有接管错误框受同一开关控制，刷新与重开侧栏保存设置，Debug 开关互不干扰");
+    console.log("PASS 原有接管错误框受同一开关控制，刷新与重开设置面板保存设置，Debug 开关互不干扰");
 
     await popup.locator("#debug-notices").check();
     assert.equal(await popup.locator("#debug-filters").isVisible(), true);
@@ -167,6 +174,7 @@ function mockChrome() {
     await popup.locator("#debug-notices").uncheck();
     assert.equal(await popup.locator("#debug-filters").isVisible(), false);
     await popup.reload();
+    await openSettings(popup, false);
     await popup.locator("#debug-notices").check();
     assert.equal(await popup.locator("[data-debug-category]:checked").count(), 1);
     assert.equal(await popup.locator('[data-debug-category="buffer"]').isChecked(), true);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 线程撕裂者
 // @namespace    https://github.com/MrTangLuyao/Bilibili-thread-ripper
-// @version      0.9.1.5
+// @version      0.9.2.0
 // @description  保留哔哩哔哩原生播放器，通过多 CDN、多 Range 并发下载改善视频缓冲速度。
 // @author       MrTangLuyao
 // @license      MIT
@@ -62,20 +62,11 @@ const chrome = (() => {
       catch (error) { console.error("BTR settings listener", error); }
     }
   };
-  const messageListeners = new Set();
+  // No toolbar icon or background page: nothing sends messages here.
   const runtime = {
     lastError: null,
     sendMessage: () => Promise.resolve(),
-    onMessage: { addListener: (listener) => messageListeners.add(listener) },
-    // The settings page asks bridge.js for live status, as the sidebar does in the extension.
-    dispatch(message) {
-      return new Promise((resolve) => {
-        let answered = false;
-        const sendResponse = (response) => { if (!answered) { answered = true; resolve(response); } };
-        for (const listener of messageListeners) listener(message, {}, sendResponse);
-        if (!answered) resolve(undefined);
-      });
-    }
+    onMessage: { addListener() {} }
   };
   // Callers either pass a callback and read runtime.lastError, or await the promise.
   const finish = (value, callback, error = null) => {
@@ -201,52 +192,33 @@ const chrome = (() => {
     }
   }
 
+  // A server added by hand in the custom CDN mode. Only its host name is kept, and only for
+  // the Bilibili video servers isBilibiliMediaUrl accepts: the signed download addresses
+  // must never be sent to anyone else.
+  function normalizeCdnHost(value) {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text || text.length > 253) return "";
+    let host = "";
+    try { host = new URL(/^[a-z][a-z\d+.-]*:\/\//.test(text) ? text : `https://${text}`).hostname; }
+    catch (_error) { return ""; }
+    return /^[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/.test(host) && MEDIA_HOST_RE.test(host) ? host : "";
+  }
+
   function normalizeSettings(input) {
     const source = input && typeof input === "object" ? input : {};
     const allowed = [4, 8, 16, 32, 64, 128];
     const requested = Math.trunc(Number(source.concurrency));
-    const danmakuSource = source.danmaku && typeof source.danmaku === "object" ? source.danmaku : {};
-    const allowedAreas = ["quarter", "half", "threeQuarter", "full"];
-    const allowedSpeeds = [1, 2.5, 5, 7.5, 10];
-    const requestedSpeed = Number(danmakuSource.speed);
-    const requestedModes = Array.isArray(danmakuSource.modes)
-      ? [...new Set(danmakuSource.modes.map(Number).filter((value) => [0, 1, 2].includes(value)))]
-      : [0, 1, 2];
-    const requestedColor = String(danmakuSource.color || "").toUpperCase();
-    const danmaku = {
-      visible: danmakuSource.visible !== false,
-      opacity: Math.max(0, Math.min(1, Number.isFinite(Number(danmakuSource.opacity)) ? Number(danmakuSource.opacity) : 0.9)),
-      area: allowedAreas.includes(danmakuSource.area) ? danmakuSource.area : "threeQuarter",
-      fontSize: Math.max(12, Math.min(64, Math.round(Number(danmakuSource.fontSize ?? source.danmakuFontSize) || 25))),
-      speed: allowedSpeeds.includes(requestedSpeed) ? requestedSpeed : 5,
-      modes: requestedModes,
-      antiOverlap: danmakuSource.antiOverlap !== false,
-      synchronousPlayback: danmakuSource.synchronousPlayback !== false,
-      mode: [0, 1, 2].includes(Number(danmakuSource.mode)) ? Number(danmakuSource.mode) : 0,
-      color: /^#[0-9A-F]{6}$/.test(requestedColor) ? requestedColor : "#FFFFFF"
-    };
-    const mode = source.mode === "overseas" ? "overseas" : "mainland";
-    const compatibilityMode = ["a", "b"].includes(String(source.compatibilityMode || "").toLowerCase())
-      ? String(source.compatibilityMode).toLowerCase()
-      : "off";
-    const requestedVolume = Number(source.volume);
     return {
       enabled: source.enabled !== false,
-      mode,
-      compatibilityMode,
+      mode: ["overseas", "custom"].includes(source.mode) ? source.mode : "mainland",
+      customHosts: (Array.isArray(source.customHosts) ? source.customHosts : [])
+        .map(normalizeCdnHost)
+        .filter((host, index, all) => host && all.indexOf(host) === index)
+        .slice(0, 32),
       debugNotices: source.debugNotices === true,
       errorNotices: source.errorNotices === true,
       debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, source.debugCategories?.[key] !== false])),
       concurrency: allowed.includes(requested) ? requested : 8,
-      volume: Number.isFinite(requestedVolume) ? Math.max(0, Math.min(1, requestedVolume)) : 0.7,
-      subtitleLanguage: /^[\w-]+$/i.test(String(source.subtitleLanguage || "off"))
-        ? String(source.subtitleLanguage).slice(0, 48)
-        : "off",
-      subtitleLastLanguage: /^[\w-]+$/i.test(String(source.subtitleLastLanguage || ""))
-        && String(source.subtitleLastLanguage).toLowerCase() !== "off"
-        ? String(source.subtitleLastLanguage).slice(0, 48)
-        : "",
-      danmaku,
       minChunkBytes: 64 * 1024,
       firstByteTimeoutMs: 5500,
       stallTimeoutMs: 4000,
@@ -259,6 +231,7 @@ const chrome = (() => {
   root.__BILI_RANGE_CORE__ = Object.freeze({
     concatChunks,
     isBilibiliMediaUrl,
+    normalizeCdnHost,
     normalizeSettings,
     parseByteRange,
     parseContentRange,
@@ -314,7 +287,7 @@ const chrome = (() => {
   function swapOrdinaryHost(rawUrl, targetHost, allowAkamai = false) {
     if (!allowAkamai && isAkamaiUrl(rawUrl)) return null;
     const host = String(targetHost || "").toLowerCase();
-    if (!GLOBAL_HOSTS.includes(host)) return null;
+    if (core.normalizeCdnHost(host) !== host) return null;
     try {
       const url = new URL(rawUrl);
       // Assigning url.host alone keeps a non-standard port, such as a peer CDN's :4483.
@@ -326,14 +299,21 @@ const chrome = (() => {
     }
   }
 
-  function representationUrls(representation, mode) {
+  // The custom mode uses only the servers picked in the settings. Without any, it works like
+  // the mainland mode.
+  function customServers(mode, customHosts) {
+    return mode === "custom" && Array.isArray(customHosts) ? customHosts.map(core.normalizeCdnHost).filter(Boolean) : [];
+  }
+
+  function representationUrls(representation, mode, customHosts = []) {
     const primary = representation?.baseUrl || representation?.base_url;
     const backup = representation?.backupUrl || representation?.backup_url || representation?.backup_url_list || [];
     const originals = [primary, ...(Array.isArray(backup) ? backup : [])]
       .map(safeMediaUrl)
       .filter(Boolean)
       .filter((value, index, all) => all.indexOf(value) === index);
-    const hosts = mode === "mainland" ? MAINLAND_HOSTS : OVERSEAS_HOSTS;
+    const custom = customServers(mode, customHosts);
+    const hosts = custom.length ? custom : mode === "overseas" ? OVERSEAS_HOSTS : MAINLAND_HOSTS;
     const donor = originals.find((url) => !isAkamaiUrl(url));
     // Some overseas accounts are given nothing but akamaized.net addresses. That used to leave
     // no node at all in mainland mode and a single one in overseas mode. The nodes accept
@@ -346,9 +326,11 @@ const chrome = (() => {
       : hosts.flatMap((host) => originals.map((url) => swapOrdinaryHost(url, host, true))))
       .map(safeMediaUrl)
       .filter(Boolean);
-    const allowedOriginals = mode === "mainland"
-      ? originals.filter((url) => MAINLAND_HOSTS.includes(new URL(url).hostname.toLowerCase()))
-      : originals.filter((url) => !MAINLAND_HOSTS.includes(new URL(url).hostname.toLowerCase()));
+    const allowedOriginals = custom.length
+      ? originals.filter((url) => custom.includes(hostOf(url)))
+      : mode === "overseas"
+        ? originals.filter((url) => !MAINLAND_HOSTS.includes(hostOf(url)))
+        : originals.filter((url) => MAINLAND_HOSTS.includes(hostOf(url)));
     return [...allowedOriginals, ...synthetic].filter((value, index, all) => all.indexOf(value) === index);
   }
 
@@ -438,14 +420,14 @@ const chrome = (() => {
     });
   }
 
-  function createResolver(representation, getMode, bans = null) {
+  function createResolver(representation, getMode, bans = null, getCustomHosts = null) {
     const health = new Map();
     let cursor = 0;
     let mediaRangeCount = 0;
     let rangeCursor = 0;
 
     function allUrls() {
-      return representationUrls(representation, getMode?.() === "overseas" ? "overseas" : "mainland");
+      return representationUrls(representation, getMode?.(), getCustomHosts?.() || []);
     }
 
     // Banned nodes are left out. If every node is banned, keep using them rather
@@ -504,7 +486,9 @@ const chrome = (() => {
       const now = Date.now();
       const primary = representation?.baseUrl || representation?.base_url;
       const backup = representation?.backupUrl || representation?.backup_url || representation?.backup_url_list || [];
-      const originals = [primary, ...(Array.isArray(backup) ? backup : [])]
+      // The first request also races the addresses Bilibili handed out, except in the custom
+      // mode, which keeps to the picked servers.
+      const originals = customServers(getMode?.(), getCustomHosts?.()).length ? [] : [primary, ...(Array.isArray(backup) ? backup : [])]
         .map(safeMediaUrl)
         .filter(Boolean);
       const candidates = unbanned([...originals, ...allUrls()]
@@ -1265,8 +1249,16 @@ const chrome = (() => {
     return "other";
   }
 
-  function codecPriority(representation) {
-    return { av1: 3, hevc: 2, avc: 1, other: 0 }[codecFamily(representation)] || 0;
+  function normalizeCodec(value) {
+    return ["av1", "hevc", "avc"].includes(value) ? value : "";
+  }
+
+  // "默认" in the player's 播放策略 menu keeps AV1 > HEVC > AVC. A codec picked there comes
+  // first; a quality that does not have it falls back to that order.
+  function codecPriority(representation, preferredCodec = "") {
+    const family = codecFamily(representation);
+    if (preferredCodec && family === preferredCodec) return 4;
+    return { av1: 3, hevc: 2, avc: 1, other: 0 }[family] || 0;
   }
 
   function qualityLabel(representation) {
@@ -1289,17 +1281,19 @@ const chrome = (() => {
   }
 
   // preferredQuality is the quality chosen in the native menu; 0 is "auto" and keeps the
-  // quality the playinfo itself asks for.
-  function selectRepresentations(playinfo, preferredQuality = 0) {
+  // quality the playinfo itself asks for. preferredCodec is the codec chosen there, "" for
+  // "默认".
+  function selectRepresentations(playinfo, preferredQuality = 0, preferredCodec = "") {
     const body = dashBody(playinfo);
     const dash = body?.dash;
     if (!dash) throw new Error("页面没有 DASH 播放清单");
+    const codec = normalizeCodec(preferredCodec);
     const byQuality = new Map();
     for (const representation of (dash.video || []).filter((item) => supported(item, "video"))) {
       const key = Number(representation.id) || `${Number(representation.height) || 0}-${Math.round(frameRate(representation))}`;
       const existing = byQuality.get(key);
-      if (!existing || codecPriority(representation) > codecPriority(existing) ||
-          (codecPriority(representation) === codecPriority(existing) && (Number(representation.bandwidth) || 0) > (Number(existing.bandwidth) || 0))) {
+      if (!existing || codecPriority(representation, codec) > codecPriority(existing, codec) ||
+          (codecPriority(representation, codec) === codecPriority(existing, codec) && (Number(representation.bandwidth) || 0) > (Number(existing.bandwidth) || 0))) {
         byQuality.set(key, representation);
       }
     }
@@ -1404,7 +1398,8 @@ const chrome = (() => {
     if (!video) throw new Error("没有找到 B 站原生 video 元素");
     let currentPlayinfo = options.playinfo;
     let preferredQuality = Math.max(0, Math.trunc(Number(options.preferredQuality)) || 0);
-    let selection = selectRepresentations(currentPlayinfo, preferredQuality);
+    let preferredCodec = normalizeCodec(options.preferredCodec);
+    let selection = selectRepresentations(currentPlayinfo, preferredQuality, preferredCodec);
     let selectedVideo = selection.preferred;
     let sessionStarts = 0;
     let session = null;
@@ -1827,8 +1822,8 @@ const chrome = (() => {
         forceStartTime: Boolean(playbackState.forceTime),
         internalSeekTarget: null,
         // One ban list per video, shared by every quality and by the audio track.
-        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode, options.cdnBans),
-        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode, options.cdnBans)
+        videoResolver: resolverFactory.createResolver(representation, () => core.normalizeSettings(getSettings()).mode, options.cdnBans, () => core.normalizeSettings(getSettings()).customHosts),
+        audioResolver: resolverFactory.createResolver(selection.audio, () => core.normalizeSettings(getSettings()).mode, options.cdnBans, () => core.normalizeSettings(getSettings()).customHosts)
       };
       session = candidate;
       if (previous) disposeSession(previous, false);
@@ -1946,7 +1941,7 @@ const chrome = (() => {
 
     async function updatePlayinfo(playinfo) {
       if (destroyed) return;
-      const next = selectRepresentations(playinfo, preferredQuality);
+      const next = selectRepresentations(playinfo, preferredQuality, preferredCodec);
       currentPlayinfo = playinfo;
       const nextVideo = next.preferred;
       const audioChanged = !sameRepresentation(selection.audio, next.audio);
@@ -1962,6 +1957,14 @@ const chrome = (() => {
       const wanted = Math.max(0, Math.trunc(Number(quality)) || 0);
       if (destroyed || wanted === preferredQuality) return;
       preferredQuality = wanted;
+      await updatePlayinfo(currentPlayinfo);
+    }
+
+    // The same for the codec picked in the 播放策略 menu.
+    async function setCodec(codec) {
+      const wanted = normalizeCodec(codec);
+      if (destroyed || wanted === preferredCodec) return;
+      preferredCodec = wanted;
       await updatePlayinfo(currentPlayinfo);
     }
 
@@ -2024,17 +2027,22 @@ const chrome = (() => {
     return Object.freeze({
       applySettings() { ensureBuffer(); },
       destroy,
+      setCodec,
       setQuality,
       updatePlayinfo,
       video,
       getDebug: () => ({
-        version: "0.9.1.5",
+        version: "0.9.2.0",
         architecture: "bilibili-native-ui-progressive-mse-0.8-core",
         quality: qualityLabel(selectedVideo),
         qualityId: Number(selectedVideo?.id) || 0,
         preferredQuality,
+        preferredCodec,
         sessionStarts,
         codec: codecFamily(selectedVideo),
+        width: Number(selectedVideo?.width) || 0,
+        height: Number(selectedVideo?.height) || 0,
+        frameRate: frameRate(selectedVideo),
         videoType: mimeFor(selectedVideo, "video"),
         audioType: mimeFor(selection.audio, "audio"),
         videoBandwidth: Number(selectedVideo?.bandwidth) || 0,
@@ -2206,6 +2214,401 @@ const chrome = (() => {
   });
 })(globalThis);
 
+/* src/settings-panel.js */
+// The settings panel of both the extension and the userscript. It runs in the bilibili page
+// and opens from the extension's toolbar icon, the userscript manager's menu, or "自定义" in
+// the player's gear menu. Settings are read and saved through bridge.js, which keeps them in
+// the extension's storage (in the userscript, in localStorage).
+(function installSettingsPanel(root) {
+  "use strict";
+
+  if (root.__BTR_SETTINGS_PANEL__) return;
+  const core = root.__BILI_RANGE_CORE__;
+  const cdn = root.__BILI_CDN_RESOLVER_FACTORY__;
+  if (!core || !cdn) return;
+
+  const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
+  const HOST_ID = "__bilibili_thread_ripper_settings__";
+  const DIALOG_ID = "__bilibili_thread_ripper_settings_dialog__";
+  const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128];
+  const MAX_CUSTOM_HOSTS = 32;
+  const HOST_GROUPS = [["大陆节点", cdn.MAINLAND_HOSTS], ["海外节点", cdn.OVERSEAS_HOSTS]];
+  const KNOWN_HOSTS = HOST_GROUPS.flatMap(([, hosts]) => hosts);
+
+  const PANEL_HTML = `
+    <main>
+      <header>
+        <div class="logo" aria-hidden="true">B</div>
+        <h1>线程撕裂者</h1>
+        <label class="switch" title="启用或停用">
+          <input id="enabled" type="checkbox">
+          <span></span>
+        </label>
+      </header>
+
+      <section class="mode-select" aria-label="CDN 模式">
+        <label><input type="radio" name="mode" value="mainland"><span>大陆</span></label>
+        <label><input type="radio" name="mode" value="overseas"><span>海外</span></label>
+        <label><input type="radio" name="mode" value="custom"><span>自定义</span></label>
+      </section>
+
+      <section id="custom-hosts" class="custom-hosts" aria-label="自定义服务器" hidden>
+        <div class="custom-head"><span>自定义服务器</span><b id="custom-count">0</b></div>
+        <p id="custom-empty" class="custom-note">还没选服务器，暂时按大陆 CDN 下载。</p>
+        <div id="known-hosts"></div>
+        <fieldset class="host-group">
+          <legend>手动添加</legend>
+          <div id="manual-hosts" class="manual-hosts"></div>
+          <form id="host-form" class="host-form">
+            <input id="host-input" type="text" placeholder="例如 upos-sz-mirrorali.bilivideo.com" spellcheck="false" autocomplete="off" aria-label="服务器地址">
+            <button type="submit">添加</button>
+          </form>
+          <p id="host-error" class="host-error" role="alert"></p>
+        </fieldset>
+        <p class="custom-note">只能填 B 站的视频服务器（bilivideo.com、akamaized.net 等），视频的下载地址不会发给别的网站。</p>
+      </section>
+
+      <section class="controls">
+        <div class="control-title">
+          <label for="concurrency">线程加载数</label>
+          <output id="thread-value" for="concurrency">8</output>
+        </div>
+        <div class="slider">
+          <div id="slider-fill" class="slider-fill" aria-hidden="true"></div>
+          <input id="concurrency" type="range" min="0" max="5" step="1" value="1" aria-label="线程加载数" aria-valuetext="8">
+        </div>
+        <div class="scale" aria-hidden="true">
+          <span>4</span><span>8</span><span>16</span><span>32</span><span>64</span><span>128</span>
+        </div>
+      </section>
+
+      <section class="notice-controls" aria-label="提示设置">
+        <div class="notice-row"><label for="error-notices">显示错误</label><label class="switch"><input id="error-notices" type="checkbox" aria-label="显示错误"><span></span></label></div>
+        <div class="notice-row"><label for="debug-notices">Debug 模式</label><label class="switch"><input id="debug-notices" type="checkbox" aria-label="Debug 模式"><span></span></label></div>
+        <fieldset id="debug-filters" class="debug-filters" hidden>
+          <legend>显示哪些 Debug 消息</legend>
+          <div class="debug-filter-actions"><button id="debug-select-all" type="button">全选</button><button id="debug-select-none" type="button">全不选</button></div>
+          <div class="debug-filter-options">
+            <label><input type="checkbox" data-debug-category="takeover">接管与切换</label>
+            <label><input type="checkbox" data-debug-category="playback">播放与暂停</label>
+            <label><input type="checkbox" data-debug-category="download">下载线程</label>
+            <label><input type="checkbox" data-debug-category="buffer">缓冲与跳转</label>
+            <label><input type="checkbox" data-debug-category="settings">设置变化</label>
+            <label><input type="checkbox" data-debug-category="other">其他日志</label>
+          </div>
+        </fieldset>
+      </section>
+
+      <section class="current-threads" aria-live="polite">
+        <span>目前总线程</span>
+        <b id="active-count">0</b>
+      </section>
+    </main>`;
+
+  const PANEL_CSS = `
+    * { box-sizing: border-box; }
+    .btr-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); }
+    .btr-popup { position: fixed; top: 72px; right: 24px; width: 320px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow: auto; border: 1px solid #30343d; border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .45); color-scheme: dark; font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: #17191f; color: #f5f7fb; font-size: 14px; line-height: normal; text-align: left; }
+    main { padding: 18px 16px; }
+    header { display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 11px; margin-bottom: 22px; }
+    .logo { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 8px; color: #fff; font-size: 23px; font-weight: 800; background: #fb7299; }
+    h1 { margin: 0; font-size: 17px; letter-spacing: .2px; }
+    .switch { position: relative; width: 42px; height: 24px; }
+    .switch input { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+    .switch span { position: absolute; inset: 0; border-radius: 999px; background: #313a4c; cursor: pointer; transition: 160ms ease; }
+    .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: 160ms ease; }
+    .switch input:checked + span { background: #fb7299; }
+    .switch input:checked + span::after { transform: translateX(18px); }
+    .switch input:focus-visible + span { outline: 2px solid #fff; outline-offset: 3px; }
+    .mode-select { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-bottom: 12px; overflow: hidden; border: 1px solid #30343d; border-radius: 8px; background: #30343d; }
+    .mode-select label { position: relative; }
+    .mode-select input { position: absolute; opacity: 0; }
+    .mode-select span { display: block; padding: 10px 6px; color: #949baa; background: #20232a; font-size: 12px; text-align: center; cursor: pointer; }
+    .mode-select input:checked + span { color: #fff; background: #fb7299; }
+    .mode-select input:focus-visible + span { outline: 2px solid #fff; outline-offset: -3px; }
+    .custom-hosts { margin-bottom: 12px; padding: 14px 16px; border: 1px solid #30343d; border-radius: 8px; background: #20232a; }
+    .custom-hosts[hidden] { display: none; }
+    .custom-head { display: flex; align-items: center; justify-content: space-between; color: #c9ced9; font-size: 13px; }
+    .custom-head b { min-width: 28px; padding: 2px 8px; border-radius: 5px; background: #fb7299; color: #fff; font-size: 12px; text-align: center; }
+    .custom-note { margin: 8px 0 0; color: #7f8797; font-size: 11px; line-height: 1.6; }
+    .custom-note[hidden] { display: none; }
+    .host-group { min-width: 0; margin: 12px 0 0; padding: 10px 0 0; border: 0; border-top: 1px solid #343943; }
+    .host-group legend { padding: 0 0 4px; color: #c9ced9; font-size: 12px; }
+    .host-option { display: flex; align-items: center; gap: 7px; margin-top: 7px; color: #c9ced9; font-size: 11px; overflow-wrap: anywhere; cursor: pointer; }
+    .host-option input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: #fb7299; cursor: pointer; }
+    .manual-host { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; color: #c9ced9; font-size: 11px; overflow-wrap: anywhere; }
+    .manual-host button { flex: none; width: 22px; height: 22px; padding: 0; border: 1px solid #444b57; border-radius: 4px; background: #292d35; color: #d9dee8; font: inherit; line-height: 20px; cursor: pointer; }
+    .host-form { display: flex; gap: 6px; margin-top: 10px; }
+    .host-form input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #444b57; border-radius: 5px; background: #17191f; color: #f5f7fb; font: inherit; font-size: 12px; }
+    .host-form button { flex: none; padding: 6px 10px; border: 0; border-radius: 5px; background: #fb7299; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+    .host-error { min-height: 0; margin: 6px 0 0; color: #f28b85; font-size: 11px; }
+    .host-error:empty { display: none; }
+    .host-form input:focus-visible, .host-form button:focus-visible, .manual-host button:focus-visible, .host-option input:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .controls { padding: 16px; border: 1px solid #30343d; border-radius: 8px; background: #20232a; }
+    .control-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .control-title label { color: #c9ced9; font-size: 13px; }
+    output { min-width: 42px; padding: 4px 8px; border-radius: 5px; color: #fff; background: #fb7299; font-size: 13px; font-weight: 700; text-align: center; }
+    .slider { position: relative; width: 100%; height: 18px; border-radius: 9px; background: #3a3e47; }
+    .slider-fill { position: absolute; top: 0; bottom: 0; left: 0; width: 60%; border-radius: 9px; background: #fb7299; pointer-events: none; }
+    input[type="range"] { position: absolute; inset: 0; width: 100%; height: 18px; margin: 0; appearance: none; -webkit-appearance: none; border: 0; outline: 0; background: transparent; cursor: pointer; }
+    input[type="range"]::-webkit-slider-runnable-track { height: 18px; background: transparent; }
+    input[type="range"]::-webkit-slider-thumb { width: 24px; height: 24px; margin-top: -3px; appearance: none; -webkit-appearance: none; border: 2px solid #fff; border-radius: 50%; background: #fff; }
+    input[type="range"]:focus-visible::-webkit-slider-thumb { border-color: #fb7299; }
+    .scale { display: flex; justify-content: space-between; margin-top: 5px; color: #7f8797; font-size: 10px; }
+    .scale span { width: 24px; text-align: center; }
+    .scale span:first-child { text-align: left; }
+    .scale span:last-child { text-align: right; }
+    .notice-controls { margin-top: 12px; padding: 14px 16px; border: 1px solid #30343d; border-radius: 8px; background: #20232a; }
+    .notice-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #c9ced9; font-size: 13px; }
+    .notice-row + .notice-row { margin-top: 14px; }
+    .debug-filters { min-width: 0; margin: 16px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid #343943; }
+    .debug-filters[hidden] { display: none; }
+    .debug-filters legend { padding: 0 0 4px; color: #c9ced9; font-size: 12px; }
+    .debug-filter-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+    .debug-filter-actions button { padding: 4px 8px; border: 1px solid #444b57; border-radius: 4px; background: #292d35; color: #d9dee8; font: inherit; font-size: 11px; cursor: pointer; }
+    .debug-filter-actions button:hover, .manual-host button:hover { border-color: #fb7299; }
+    .debug-filter-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 8px; }
+    .debug-filter-options label { display: flex; align-items: center; gap: 7px; color: #c9ced9; font-size: 12px; cursor: pointer; }
+    .debug-filter-options input { flex: none; width: 15px; height: 15px; margin: 0; accent-color: #fb7299; cursor: pointer; }
+    .debug-filter-actions button:focus-visible, .debug-filter-options input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+    .current-threads { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding: 16px; border: 1px solid #30343d; border-radius: 8px; background: #20232a; color: #c9ced9; font-size: 13px; }
+    .current-threads b { color: #fff; font-size: 20px; font-variant-numeric: tabular-nums; }
+    .btr-close { position: sticky; bottom: 12px; display: block; width: calc(100% - 32px); margin: 0 16px 16px; padding: 8px; border: 1px solid #444b57; border-radius: 6px; background: #292d35; color: #d9dee8; font: inherit; font-size: 13px; cursor: pointer; box-shadow: 0 -6px 12px #17191f; }
+    .btr-close:hover { border-color: #fb7299; }
+    .btr-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  `;
+
+  let current = null;
+  // bridge.js sends the stored settings when they load or change, and the page its stats.
+  let latestSettings = null;
+  let latestStats = null;
+  const post = (type, payload) => root.postMessage({ channel: CHANNEL, type, payload }, "*");
+
+  function open() {
+    if (current) return;
+    // A modal <dialog> sits in the browser's top layer and is the only interactive part of
+    // the page while it is open. A plain fixed layer can end up under the page's own
+    // top-layer elements, or inside a part of the page made inert, and then clicks on it
+    // land on whatever is beneath (issue #8).
+    const dialog = document.createElement("dialog");
+    dialog.id = DIALOG_ID;
+    dialog.style.cssText = "all:initial!important;display:block!important;position:fixed!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;overflow:visible!important;z-index:2147483646!important;";
+    const dialogStyle = document.createElement("style");
+    dialogStyle.textContent = `#${DIALOG_ID}::backdrop{background:transparent}`;
+    const host = document.createElement("div");
+    host.id = HOST_ID;
+    host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;";
+    dialog.append(dialogStyle, host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = PANEL_CSS;
+    const backdrop = document.createElement("div");
+    backdrop.className = "btr-backdrop";
+    const panel = document.createElement("div");
+    panel.className = "btr-popup";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "线程撕裂者设置");
+    panel.tabIndex = -1;
+    panel.innerHTML = PANEL_HTML;
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "btr-close";
+    closeButton.textContent = "关闭";
+    panel.append(closeButton);
+    shadow.append(style, backdrop, panel);
+
+    const $ = (id) => shadow.getElementById(id);
+    const enabled = $("enabled");
+    const concurrency = $("concurrency");
+    const threadValue = $("thread-value");
+    const sliderFill = $("slider-fill");
+    const errorNotices = $("error-notices");
+    const debugNotices = $("debug-notices");
+    const debugFilters = $("debug-filters");
+    const debugCategoryInputs = [...shadow.querySelectorAll("[data-debug-category]")];
+    const customSection = $("custom-hosts");
+    const hostInput = $("host-input");
+    const hostError = $("host-error");
+    const activeCount = $("active-count");
+    let customHosts = [];
+
+    const save = (update) => post("settings-update", update);
+
+    function setSlider(threads) {
+      const index = THREAD_OPTIONS.indexOf(Number(threads));
+      const safe = index < 0 ? 1 : index;
+      concurrency.value = String(safe);
+      threadValue.value = String(THREAD_OPTIONS[safe]);
+      concurrency.setAttribute("aria-valuetext", String(THREAD_OPTIONS[safe]));
+      sliderFill.style.width = `${safe / (THREAD_OPTIONS.length - 1) * 100}%`;
+    }
+
+    function setMode(mode) {
+      for (const radio of shadow.querySelectorAll('input[name="mode"]')) radio.checked = radio.value === mode;
+      customSection.hidden = mode !== "custom";
+    }
+
+    function renderHosts() {
+      $("custom-count").textContent = String(customHosts.length);
+      $("custom-empty").hidden = customHosts.length > 0;
+      const known = $("known-hosts");
+      known.replaceChildren(...HOST_GROUPS.map(([title, hosts]) => {
+        const group = document.createElement("fieldset");
+        group.className = "host-group";
+        const legend = document.createElement("legend");
+        legend.textContent = title;
+        group.append(legend, ...hosts.map((value) => {
+          const label = document.createElement("label");
+          label.className = "host-option";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = value;
+          input.checked = customHosts.includes(value);
+          const text = document.createElement("span");
+          text.textContent = value;
+          label.append(input, text);
+          return label;
+        }));
+        return group;
+      }));
+      $("manual-hosts").replaceChildren(...customHosts.filter((value) => !KNOWN_HOSTS.includes(value)).map((value) => {
+        const row = document.createElement("div");
+        row.className = "manual-host";
+        const text = document.createElement("span");
+        text.textContent = value;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.remove = value;
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", `删除 ${value}`);
+        row.append(text, remove);
+        return row;
+      }));
+    }
+
+    function setCustomHosts(next) {
+      customHosts = next;
+      renderHosts();
+      save({ customHosts });
+    }
+
+    function render(settings) {
+      enabled.checked = settings.enabled;
+      setSlider(settings.concurrency);
+      setMode(settings.mode);
+      customHosts = settings.customHosts;
+      renderHosts();
+      errorNotices.checked = settings.errorNotices;
+      debugNotices.checked = settings.debugNotices;
+      debugFilters.hidden = !settings.debugNotices;
+      for (const input of debugCategoryInputs) input.checked = settings.debugCategories[input.dataset.debugCategory] !== false;
+    }
+
+    const saveDebugCategories = () => save({ debugCategories: Object.fromEntries(debugCategoryInputs.map((input) => [input.dataset.debugCategory, input.checked])) });
+    enabled.addEventListener("change", () => save({ enabled: enabled.checked }));
+    concurrency.addEventListener("input", () => {
+      const threads = THREAD_OPTIONS[Number(concurrency.value)];
+      setSlider(threads);
+      save({ concurrency: threads });
+    });
+    for (const radio of shadow.querySelectorAll('input[name="mode"]')) {
+      radio.addEventListener("change", () => {
+        if (!radio.checked) return;
+        setMode(radio.value);
+        save({ mode: radio.value });
+      });
+    }
+    $("known-hosts").addEventListener("change", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || !KNOWN_HOSTS.includes(input.value)) return;
+      if (input.checked && customHosts.length >= MAX_CUSTOM_HOSTS) {
+        input.checked = false;
+        hostError.textContent = `最多选 ${MAX_CUSTOM_HOSTS} 个服务器。`;
+        return;
+      }
+      hostError.textContent = "";
+      setCustomHosts(input.checked ? [...customHosts.filter((value) => value !== input.value), input.value] : customHosts.filter((value) => value !== input.value));
+    });
+    $("manual-hosts").addEventListener("click", (event) => {
+      const value = event.target instanceof HTMLElement ? event.target.dataset.remove : "";
+      if (value) setCustomHosts(customHosts.filter((item) => item !== value));
+    });
+    $("host-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const value = core.normalizeCdnHost(hostInput.value);
+      if (!value) hostError.textContent = "这不是 B 站的视频服务器地址。";
+      else if (customHosts.includes(value)) hostError.textContent = "这个服务器已经在列表里了。";
+      else if (customHosts.length >= MAX_CUSTOM_HOSTS) hostError.textContent = `最多选 ${MAX_CUSTOM_HOSTS} 个服务器。`;
+      else {
+        hostError.textContent = "";
+        hostInput.value = "";
+        setCustomHosts([...customHosts, value]);
+      }
+    });
+    errorNotices.addEventListener("change", () => save({ errorNotices: errorNotices.checked }));
+    debugNotices.addEventListener("change", () => {
+      debugFilters.hidden = !debugNotices.checked;
+      save({ debugNotices: debugNotices.checked });
+    });
+    for (const input of debugCategoryInputs) input.addEventListener("change", saveDebugCategories);
+    $("debug-select-all").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = true; saveDebugCategories(); });
+    $("debug-select-none").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = false; saveDebugCategories(); });
+
+    // Keys typed into the panel belong to it. The shadow root hides the input from the page,
+    // so the player's shortcuts (space, F, arrows) would otherwise react to them.
+    const keepKeys = (event) => { if (event.key !== "Escape") event.stopPropagation(); };
+    for (const type of ["keydown", "keyup", "keypress"]) panel.addEventListener(type, keepKeys);
+
+    // The live thread count: asking for stats makes the page send fresh ones.
+    const refresh = () => {
+      activeCount.textContent = String(Math.max(0, Math.trunc(Number(latestStats?.activeThreads) || 0)));
+      post("get-stats");
+    };
+    const timer = setInterval(refresh, 400);
+    const onKey = (event) => { if (event.key === "Escape") close(); };
+    const close = () => {
+      if (current?.host !== host) return;
+      current = null;
+      clearInterval(timer);
+      document.removeEventListener("keydown", onKey, true);
+      dialog.remove();
+    };
+    // Changes made elsewhere (the gear menu, another tab) arrive as new settings.
+    current = { host, close, render };
+    backdrop.addEventListener("click", close);
+    closeButton.addEventListener("click", close);
+    document.addEventListener("keydown", onKey, true);
+    // Esc on a modal dialog closes it natively; clean up the same way as the button.
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
+    (document.body || document.documentElement).append(dialog);
+    try { dialog.showModal(); }
+    catch (_error) { dialog.setAttribute("open", ""); }
+    render(latestSettings || core.normalizeSettings({}));
+    post("get-settings");
+    refresh();
+    panel.focus();
+  }
+
+  const toggle = () => (current ? current.close() : open());
+  root.addEventListener("message", (event) => {
+    if (event.source !== root || event.data?.channel !== CHANNEL) return;
+    if (event.data.type === "settings") {
+      latestSettings = core.normalizeSettings(event.data.payload);
+      current?.render(latestSettings);
+    } else if (event.data.type === "stats") {
+      latestStats = event.data.payload;
+    } else if (event.data.type === "open-settings" && root.top === root) {
+      // The toolbar icon toggles the panel; "自定义" in the gear menu only opens it.
+      if (event.data.payload?.toggle) toggle();
+      else open();
+    }
+  });
+  // The userscript manager's menu entry.
+  document.addEventListener("btr-userscript-open-settings", () => { if (root.top === root) toggle(); });
+
+  root.__BTR_SETTINGS_PANEL__ = Object.freeze({ open, close: () => current?.close(), toggle, isOpen: () => Boolean(current) });
+})(globalThis);
+
 /* src/page-hook.js */
 (function installPageHook(root) {
   "use strict";
@@ -2213,9 +2616,6 @@ const chrome = (() => {
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
   const INSTALL_FLAG = "__biliThreadRipper0901Installed";
   const BILIBILI_API_ORIGIN = "https://api.bilibili.com";
-  const COMPATIBILITY_RELOAD_KEY = "__btrCompatibilityReloadV1";
-  const COMPATIBILITY_DOCUMENT_ID = root.crypto?.randomUUID?.()
-    || `${Number(root.performance?.timeOrigin || Date.now()).toString(36)}-${Number(root.performance?.now?.() || 0).toString(36)}-${Math.random().toString(36).slice(2)}`;
   const THREAD_OPTIONS = Object.freeze([4, 8, 16, 32, 64, 128]);
   const STATE_LABELS = Object.freeze({ waiting: "正在等视频信息", loading: "正在准备播放", ready: "视频已经准备好了", buffering: "正在补充缓冲", ended: "视频播放完了", error: "播放器出错了", "native-fallback": "已经改回 B 站原来的连接", disabled: "加速已关闭" });
   const KIND_LABELS = Object.freeze({ video: "画面", audio: "声音", meta: "视频信息" });
@@ -2225,7 +2625,6 @@ const chrome = (() => {
 
   const core = root.__BILI_RANGE_CORE__;
   const playerFactory = root.__BILI_NATIVE_MSE_PLAYER_FACTORY__;
-  const earlyMask = root.__BILI_THREAD_RIPPER_EARLY_MASK__;
   const notices = root.__BTR_RUNTIME_NOTICES__;
   if (!core || !playerFactory || typeof root.fetch !== "function") return;
   Object.defineProperty(root, INSTALL_FLAG, { value: true });
@@ -2248,6 +2647,8 @@ const chrome = (() => {
   let playerLifecycle = 0;
   let qualityPlayer = null;
   let syncedQuality = 0;
+  let codecPlayer = null;
+  let syncedCodec = "";
   let infoPanel = null;
   let infoPanelObserver = null;
   const lastHostByKind = { video: "", audio: "" };
@@ -2269,14 +2670,10 @@ const chrome = (() => {
   let autoRetakeRoute = "";
   let autoRetakeCount = 0;
   let autoRetakeAt = 0;
-  let compatibilityReloadTimer = null;
-  let compatibilityReloadRoute = "";
-  let compatibilityReloadTicket = 0;
-  let compatibilityObservedRoute = null;
   let transferSequence = 1;
   const transfers = new Map();
   const stats = {
-    version: "0.9.1.5",
+    version: "0.9.2.0",
     architecture: "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
@@ -2336,14 +2733,12 @@ const chrome = (() => {
       };
     }
     publish();
-    scheduleCompatibilityFailureReload(route);
   }
 
   // A failed download used to leave the video on Bilibili's own connection until the page
   // changed. Most such failures are one slow CDN reply, so the takeover is tried again a few
-  // times with a growing pause. The compatibility modes reload the page instead.
+  // times with a growing pause.
   function scheduleAutoRetake(route) {
-    if (settings.compatibilityMode !== "off") return;
     const now = Date.now();
     if (autoRetakeRoute !== route || now - autoRetakeAt > 120000) {
       autoRetakeRoute = route;
@@ -2361,178 +2756,6 @@ const chrome = (() => {
       failedRoute = "";
       restartPlayer(true);
     }, 4000 * (2 ** (attempt - 1)));
-  }
-
-  function readCompatibilityReloadState() {
-    try {
-      const parsed = JSON.parse(root.sessionStorage.getItem(COMPATIBILITY_RELOAD_KEY) || "null");
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function writeCompatibilityReloadState(value) {
-    try { root.sessionStorage.setItem(COMPATIBILITY_RELOAD_KEY, JSON.stringify(value)); }
-    catch (_error) {}
-  }
-
-  function clearCompatibilityReloadState() {
-    try { root.sessionStorage.removeItem(COMPATIBILITY_RELOAD_KEY); }
-    catch (_error) {}
-  }
-
-  function cancelCompatibilityReload(clearState = false) {
-    compatibilityReloadTicket += 1;
-    clearTimeout(compatibilityReloadTimer);
-    compatibilityReloadTimer = null;
-    compatibilityReloadRoute = "";
-    if (clearState) clearCompatibilityReloadState();
-  }
-
-  function observeCompatibilityRoute(identity) {
-    const route = identity?.key || "";
-    if (compatibilityObservedRoute === null) {
-      compatibilityObservedRoute = route;
-      return;
-    }
-    if (compatibilityObservedRoute === route) return;
-    compatibilityObservedRoute = route;
-    cancelCompatibilityReload(true);
-  }
-
-  function compatibilityTargetUrl(identity) {
-    const target = new URL(location.href);
-    const pathMatch = /\/video\/(BV[0-9A-Za-z]+|av\d+)/i.exec(target.pathname);
-    const pathId = String(pathMatch?.[1] || "");
-    const targetId = identity.bvid || (identity.aid ? `av${identity.aid}` : "");
-    if (targetId && pathId.toLowerCase() !== targetId.toLowerCase()) {
-      target.pathname = `/video/${targetId}`;
-      target.searchParams.delete("p");
-    }
-    if (identity.part > 1) target.searchParams.set("p", String(identity.part));
-    return target.href;
-  }
-
-  function performCompatibilityReload(identity, route) {
-    if (routeIdentity()?.key !== route) return;
-    const target = compatibilityTargetUrl(identity);
-    if (target !== location.href) root.location.replace(target);
-    else root.location.reload();
-  }
-
-  function scheduleCompatibilityReload(identity, reason) {
-    const compatibilityMode = settings.compatibilityMode || "off";
-    if (!identity || compatibilityMode === "off") return false;
-    const route = identity.key;
-    if (compatibilityReloadTimer && compatibilityReloadRoute === route) return true;
-    cancelCompatibilityReload(false);
-    const previous = readCompatibilityReloadState();
-    const sameAttempt = previous?.mode === compatibilityMode && previous?.route === route;
-    const failures = reason === "failure" ? (sameAttempt ? Number(previous.failures) || 0 : 0) + 1 : 0;
-    writeCompatibilityReloadState({
-      mode: compatibilityMode,
-      route,
-      preflightDone: reason === "failure" ? Boolean(previous?.preflightDone) : false,
-      failures,
-      reason,
-      phase: `${reason}-scheduled`,
-      documentId: COMPATIBILITY_DOCUMENT_ID,
-      updatedAt: Date.now()
-    });
-    compatibilityReloadRoute = route;
-    const ticket = ++compatibilityReloadTicket;
-    const navigationGeneration = routeGeneration;
-    const delay = reason === "preflight" ? 50 : Math.min(5000, 350 * (2 ** Math.min(4, Math.max(0, failures - 1))));
-    notices?.log("兼容模式准备刷新网页", `已开启兼容模式 ${compatibilityMode.toUpperCase()}。${reason === "preflight" ? "播放前会先刷新一次。" : "这次加载失败了，准备刷新后重试。"}\n大约 ${(delay / 1000).toFixed(1)} 秒后刷新。`, "info", "", route, "settings");
-    compatibilityReloadTimer = setTimeout(() => {
-      if (ticket !== compatibilityReloadTicket) return;
-      if (navigationGeneration !== routeGeneration || routeIdentity()?.key !== route) {
-        compatibilityReloadTimer = null;
-        compatibilityReloadRoute = "";
-        const stale = readCompatibilityReloadState();
-        if (stale?.documentId === COMPATIBILITY_DOCUMENT_ID && stale?.phase === `${reason}-scheduled`) clearCompatibilityReloadState();
-        return;
-      }
-      const scheduled = readCompatibilityReloadState();
-      if (scheduled?.mode !== compatibilityMode || scheduled?.route !== route || scheduled?.documentId !== COMPATIBILITY_DOCUMENT_ID || scheduled?.phase !== `${reason}-scheduled`) {
-        compatibilityReloadTimer = null;
-        compatibilityReloadRoute = "";
-        return;
-      }
-      compatibilityReloadTimer = null;
-      compatibilityReloadRoute = "";
-      writeCompatibilityReloadState({
-        ...scheduled,
-        preflightDone: compatibilityMode === "b" ? true : Boolean(scheduled.preflightDone),
-        phase: `${reason}-issued`,
-        updatedAt: Date.now()
-      });
-      performCompatibilityReload(identity, route);
-    }, delay);
-    return true;
-  }
-
-  function ensureCompatibilityPreflight(identity) {
-    const state = readCompatibilityReloadState();
-    if (["a", "b"].includes(settings.compatibilityMode)
-      && state?.mode === settings.compatibilityMode
-      && state?.route === identity.key
-      && state?.documentId === COMPATIBILITY_DOCUMENT_ID
-      && state?.phase === "failure-issued") {
-      if (Date.now() - (Number(state.updatedAt) || 0) < 1500) return true;
-      return scheduleCompatibilityReload(identity, "failure");
-    }
-    if (settings.compatibilityMode !== "b") return false;
-    if (state?.mode === "b" && state?.route === identity.key) {
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-scheduled") return true;
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-issued") {
-        if (Date.now() - (Number(state.updatedAt) || 0) < 1500) return true;
-        return scheduleCompatibilityReload(identity, "preflight");
-      }
-      if (state.documentId !== COMPATIBILITY_DOCUMENT_ID && state.phase === "preflight-issued") {
-        writeCompatibilityReloadState({
-          ...state,
-          preflightDone: true,
-          phase: "preflight-consumed",
-          documentId: COMPATIBILITY_DOCUMENT_ID,
-          updatedAt: Date.now()
-        });
-        return false;
-      }
-      if (state.documentId !== COMPATIBILITY_DOCUMENT_ID && state.phase === "failure-issued" && state.preflightDone === true) {
-        writeCompatibilityReloadState({
-          ...state,
-          phase: "failure-consumed",
-          documentId: COMPATIBILITY_DOCUMENT_ID,
-          updatedAt: Date.now()
-        });
-        return false;
-      }
-      if (state.documentId === COMPATIBILITY_DOCUMENT_ID && state.preflightDone === true) return false;
-    }
-    return scheduleCompatibilityReload(identity, "preflight");
-  }
-
-  function scheduleCompatibilityFailureReload(route) {
-    if (!settings || !["a", "b"].includes(settings.compatibilityMode)) return;
-    const identity = routeIdentity();
-    if (!identity || identity.key !== route) return;
-    scheduleCompatibilityReload(identity, "failure");
-  }
-
-  function markCompatibilitySuccess(route) {
-    if (compatibilityReloadRoute === route) cancelCompatibilityReload(false);
-    const state = readCompatibilityReloadState();
-    if (!state || state.route !== route || state.mode !== settings.compatibilityMode) return;
-    writeCompatibilityReloadState({
-      ...state,
-      failures: 0,
-      reason: "ready",
-      phase: "ready",
-      documentId: COMPATIBILITY_DOCUMENT_ID,
-      updatedAt: Date.now()
-    });
   }
 
   function transferSpeed(item, now) {
@@ -2581,9 +2804,10 @@ const chrome = (() => {
       let host = "";
       try { host = new URL(event.url).hostname; } catch (_error) {}
       if (settings.debugNotices && settings.debugCategories?.download !== false) notices?.log("开始下载一小段数据", `第 ${id} 条线程正在下载${KIND_LABELS[event.kind] || "画面"}。\n下载节点：${host}`, "info", `range-start-${event.kind}`, undefined, "download");
+      const kind = ["video", "audio", "meta"].includes(event.kind) ? event.kind : "video";
       transfers.set(id, {
         id,
-        kind: ["video", "audio", "meta"].includes(event.kind) ? event.kind : "video",
+        kind,
         host,
         loaded: 0,
         totalBytes: Math.max(0, Number(event.totalBytes) || 0),
@@ -2598,8 +2822,9 @@ const chrome = (() => {
       });
       stats.lastHost = host;
       if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
+      trackBusy(kind, now);
       // One segment starts and ends dozens of transfers within the same moment. Publishing
-      // each of them at once copied the whole thread list to the side panel every time.
+      // each of them at once copied the whole thread list to the extension every time.
       schedulePublish();
       return id;
     }
@@ -2615,6 +2840,7 @@ const chrome = (() => {
       const bytes = Math.max(0, Number(event.bytes) || 0);
       recentBytes.push({ at: now, bytes });
       while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
+      speedMeters[item.kind]?.samples.push({ at: now, bytes });
       item.loaded += bytes;
       item.sampleBytes += bytes;
       item.lastByteAt = now;
@@ -2630,12 +2856,14 @@ const chrome = (() => {
     } else {
       if (event.phase === "cancel") {
         transfers.delete(item.id);
+        trackBusy(item.kind, now);
         schedulePublish();
         return event.id;
       }
       item.state = event.phase === "done" ? "done" : "error";
       item.finalBps = event.phase === "done" ? item.loaded * 1000 / Math.max(1, now - item.startedAt) : 0;
       item.expiresAt = now + 3500;
+      trackBusy(item.kind, now);
       schedulePublish();
     }
     return event.id;
@@ -2910,10 +3138,11 @@ const chrome = (() => {
   // idle connections are closed after a while.
   let preconnectKey = "";
   function preconnectCdnNodes(route) {
-    const key = `${settings.mode}:${route}`;
-    if (preconnectKey === key) return;
     const factory = root.__BILI_CDN_RESOLVER_FACTORY__;
-    const hosts = settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const custom = settings.mode === "custom" ? settings.customHosts : [];
+    const hosts = custom.length ? custom : settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const key = `${settings.mode}:${custom.join(",")}:${route}`;
+    if (preconnectKey === key) return;
     const parent = document.head || document.documentElement;
     if (!Array.isArray(hosts) || !parent) return;
     preconnectKey = key;
@@ -2997,25 +3226,27 @@ const chrome = (() => {
       panel.append(
         settingGroup("线程撕裂者 CDN", "btr-native-mode", [
           { label: "大陆 CDN", value: "mainland" },
-          { label: "海外 CDN", value: "overseas" }
+          { label: "海外 CDN", value: "overseas" },
+          { label: "自定义", value: "custom" }
         ], settings.mode),
-        settingGroup("并发线程", "btr-native-concurrency", THREAD_OPTIONS.map((value) => ({ label: String(value), value })), settings.concurrency),
-        settingGroup("兼容模式", "btr-native-compatibility", [
-          { label: "标准模式", value: "off" },
-          { label: "兼容模式 A", value: "a" },
-          { label: "兼容模式 B", value: "b" }
-        ], settings.compatibilityMode)
+        settingGroup("并发线程", "btr-native-concurrency", THREAD_OPTIONS.map((value) => ({ label: String(value), value })), settings.concurrency)
       );
       panel.addEventListener("change", (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement) || !input.checked) return;
-        if (input.name === "btr-native-mode") {
+        if (input.name === "btr-native-mode" && ["mainland", "overseas", "custom"].includes(input.value)) {
           root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { mode: input.value } }, "*");
         } else if (input.name === "btr-native-concurrency") {
           const concurrency = Number(input.value);
           if (THREAD_OPTIONS.includes(concurrency)) root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { concurrency } }, "*");
-        } else if (input.name === "btr-native-compatibility" && ["off", "a", "b"].includes(input.value)) {
-          root.postMessage({ channel: CHANNEL, type: "settings-update", payload: { compatibilityMode: input.value } }, "*");
+        }
+      });
+      // The servers of the custom mode are picked in the settings panel, so "自定义" opens it,
+      // also when it is already chosen.
+      panel.addEventListener("click", (event) => {
+        const input = event.target;
+        if (input instanceof HTMLInputElement && input.name === "btr-native-mode" && input.value === "custom") {
+          root.postMessage({ channel: CHANNEL, type: "open-settings" }, "*");
         }
       });
       const before = mount.querySelector(".bpx-player-ctrl-setting-others");
@@ -3023,7 +3254,6 @@ const chrome = (() => {
     }
     for (const input of panel.querySelectorAll('input[name="btr-native-mode"]')) input.checked = input.value === settings.mode;
     for (const input of panel.querySelectorAll('input[name="btr-native-concurrency"]')) input.checked = Number(input.value) === settings.concurrency;
-    for (const input of panel.querySelectorAll('input[name="btr-native-compatibility"]')) input.checked = input.value === settings.compatibilityMode;
   }
 
   function scheduleSettingsMenuSync() {
@@ -3131,11 +3361,71 @@ const chrome = (() => {
     });
   }
 
+  // The codec picked in the player's 播放策略 menu. Bilibili stores it as
+  // bilibili_player_codec_prefer_type: "1" HEVC, "2" AVC, "3" AV1, "0" for "默认".
+  function nativeCodec() {
+    try { return { 1: "hevc", 2: "avc", 3: "av1" }[root.localStorage.getItem("bilibili_player_codec_prefer_type")] || ""; }
+    catch (_error) { return ""; }
+  }
+
+  function syncNativeCodec() {
+    const wanted = nativeCodec();
+    if (!player?.setCodec || (codecPlayer === player && syncedCodec === wanted)) return;
+    const current = player, route = playerRoute, lifecycle = playerLifecycle;
+    codecPlayer = current;
+    syncedCodec = wanted;
+    notices?.log("跟随播放器切换编码", wanted ? `正在换成播放策略里选的 ${wanted.toUpperCase()}。` : "播放策略改回了默认，按 AV1、HEVC、AVC 的顺序选。", "info", "", route, "playback");
+    current.setCodec(wanted).catch((error) => {
+      if (lifecycle === playerLifecycle && player === current) recordTakeoverFailure(route, "quality", error, true);
+    });
+  }
+
   function watchQualityMenu(event) {
-    if (!(event.target instanceof Element) || !event.target.closest(".bpx-player-ctrl-quality-menu-item")) return;
+    if (!(event.target instanceof Element)) return;
+    const sync = event.target.closest(".bpx-player-ctrl-quality-menu-item") ? syncNativeQuality
+      : event.target.closest(".bpx-player-ctrl-setting-codec") ? syncNativeCodec : null;
+    if (!sync) return;
     // Capture phase runs before Bilibili's own handler; read the choice once it has run.
-    setTimeout(syncNativeQuality, 0);
-    setTimeout(syncNativeQuality, 300);
+    setTimeout(sync, 0);
+    setTimeout(sync, 300);
+  }
+
+  // Video Speed and Audio Speed in the native panel are how fast the latest data came in
+  // while it was being downloaded, and they keep that value between segments. Here it is
+  // all threads of a kind together over the last few seconds; the pauses between segments
+  // do not count, and the value stays until new data arrives.
+  const SPEED_WINDOW_MS = 3000;
+  const speedMeters = { video: { busySince: 0, spans: [], samples: [], shown: 0 }, audio: { busySince: 0, spans: [], samples: [], shown: 0 } };
+
+  // Measured while data comes in and once more when the downloads stop; the value then stays
+  // as it was instead of fading while the window slides past the last data.
+  function updateSpeed(meter, now) {
+    const from = now - SPEED_WINDOW_MS;
+    meter.spans = meter.spans.filter(([, end]) => end > from);
+    meter.samples = meter.samples.filter((sample) => sample.at > from);
+    const busyMs = meter.spans.reduce((sum, [start, end]) => sum + end - Math.max(start, from), 0)
+      + (meter.busySince ? now - Math.max(meter.busySince, from) : 0);
+    const bytes = meter.samples.reduce((sum, sample) => sum + sample.bytes, 0);
+    // Bytes per millisecond times 8 is kilobits per second.
+    if (bytes > 0 && busyMs >= 250) meter.shown = Math.round(bytes * 8 / busyMs);
+  }
+
+  function trackBusy(kind, now) {
+    const meter = speedMeters[kind];
+    if (!meter) return;
+    const busy = [...transfers.values()].some((item) => item.kind === kind && item.state === "active");
+    if (busy && !meter.busySince) meter.busySince = now;
+    else if (!busy && meter.busySince) {
+      meter.spans.push([meter.busySince, now]);
+      meter.busySince = 0;
+      updateSpeed(meter, now);
+    }
+  }
+
+  function measuredSpeed(kind, now) {
+    const meter = speedMeters[kind];
+    if (meter.busySince) updateSpeed(meter, now);
+    return meter.shown;
   }
 
   // Bilibili's "视频统计信息" panel reads its own player core, which downloads nothing while
@@ -3146,22 +3436,20 @@ const chrome = (() => {
     if (!info?.videoType || playerContainer?.dataset.btrMseActive !== "true") return null;
     const now = Date.now();
     while (recentBytes.length && now - recentBytes[0].at > 1000) recentBytes.shift();
-    const speed = (kind) => Math.round([...transfers.values()]
-      .filter((item) => item.kind === kind && item.state === "active")
-      .reduce((sum, item) => sum + item.bps, 0) * 8 / 1000);
     const track = info.tracks?.find((item) => item.kind === "video");
     const frames = player.video?.getVideoPlaybackQuality?.();
     return {
       "Mime Type": `${info.videoType}, ${info.audioType}`,
-      "Player Type": `线程撕裂者 ${stats.version} 接管`,
+      "Player Type": "BTR Native",
+      "Resolution": info.width && info.height ? `${info.width} x ${info.height}@${Number((Number(info.frameRate) || 0).toFixed(3))}` : undefined,
       "Video DataRate": `${Math.round(info.videoBandwidth / 1000)} Kbps [${String(info.codec).toUpperCase()}]`,
       "Audio DataRate": `${Math.round(info.audioBandwidth / 1000)} Kbps`,
       "Segments": track ? `${track.nextIndex} / ${track.segments}${info.lastSeekMs ? `，跳转恢复 ${(info.lastSeekMs / 1000).toFixed(1)} 秒，之后卡顿 ${info.stallsAfterSeek} 次` : ""}` : undefined,
       "Dropped Frames": frames ? `${frames.droppedVideoFrames} / ${frames.totalVideoFrames}` : undefined,
       "Video Host": lastHostByKind.video || undefined,
       "Audio Host": lastHostByKind.audio || undefined,
-      "Video Speed": `${speed("video")} Kbps`,
-      "Audio Speed": `${speed("audio")} Kbps`,
+      "Video Speed": `${measuredSpeed("video", now)} Kbps`,
+      "Audio Speed": `${measuredSpeed("audio", now)} Kbps`,
       "Network Activity": `${Math.round(recentBytes.reduce((sum, item) => sum + item.bytes, 0) / 1024)} KB`
     };
   }
@@ -3193,13 +3481,11 @@ const chrome = (() => {
       return;
     }
     const identity = routeIdentity();
-    observeCompatibilityRoute(identity);
     if (!settings.enabled || !identity) {
       pendingPodSwitch = null;
       clearTakeoverFailure();
       stats.lastError = "";
       if (player) stopPlayer(true);
-      earlyMask?.release?.();
       return;
     }
     if (pendingPodSwitch) {
@@ -3217,22 +3503,9 @@ const chrome = (() => {
       clearTakeoverFailure();
       stats.lastError = "";
     }
-    if (ensureCompatibilityPreflight(identity)) {
-      stats.playerState = "waiting";
-      schedulePublish();
-      earlyMask?.release?.();
-      return;
-    }
-    if (!player && failedRoute === route) {
-      earlyMask?.release?.();
-      return;
-    }
-    if (player && playerRoute === route && playerContainer?.isConnected && player.video?.isConnected) {
-      earlyMask?.release?.();
-      return;
-    }
+    if (!player && failedRoute === route) return;
+    if (player && playerRoute === route && playerContainer?.isConnected && player.video?.isConnected) return;
     if (startingRoute === route) return;
-    earlyMask?.arm?.();
     const container = findContainer();
     if (!container) {
       stats.playerState = stats.takeoverError?.route === route ? "error" : "waiting";
@@ -3276,12 +3549,15 @@ const chrome = (() => {
       cdnBanRoute = route;
     }
     const preferredQuality = nativeQuality();
+    const preferredCodec = nativeCodec();
     const resumeAfterStop = takeResumeHint();
+    for (const meter of Object.values(speedMeters)) meter.shown = 0;
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
         identity,
         preferredQuality,
+        preferredCodec,
         // A collection item is a different video. Its native <video> element
         // can still expose the previous item's currentTime until new metadata
         // arrives, so carrying that value across would clamp short videos to
@@ -3298,10 +3574,6 @@ const chrome = (() => {
           if (lifecycle !== playerLifecycle) return;
           notices?.log(title, detail, level, "", route, category);
         },
-        onSettingsChange(next) {
-          if (lifecycle !== playerLifecycle) return;
-          root.postMessage({ channel: CHANNEL, type: "settings-update", payload: next }, "*");
-        },
         onNativeSourceChange() {
           if (lifecycle !== playerLifecycle) return;
           notices?.detach("B 站正在切换视频，准备重新接管");
@@ -3314,7 +3586,6 @@ const chrome = (() => {
             clearTakeoverFailure();
             stats.lastError = "";
           }
-          markCompatibilitySuccess(route);
           stats.acceleratedRequests += 1;
           stats.acceleratedBytes += Number(event.bytes) || 0;
           stats.parallelSubrequests += Number(event.pieces) || 0;
@@ -3329,7 +3600,6 @@ const chrome = (() => {
             clearTakeoverFailure();
             stats.lastError = "";
           }
-          if (next.playerState === "ready") markCompatibilitySuccess(route);
           stats.quality = next.quality || stats.quality;
           stats.bufferedAhead = Number(next.bufferedAhead) || 0;
           stats.lastError = next.lastError ? String(next.lastError).slice(0, 180) : stats.lastError;
@@ -3351,7 +3621,6 @@ const chrome = (() => {
           setTimeout(() => {
             if (lifecycle === playerLifecycle && player && playerRoute === route && stats.playerState === "error") {
               stopPlayer(true);
-              earlyMask?.release?.();
               stats.playerState = "native-fallback";
               publish();
               scheduleAutoRetake(route);
@@ -3369,35 +3638,29 @@ const chrome = (() => {
       playerContainer = container;
       qualityPlayer = nextPlayer;
       syncedQuality = preferredQuality;
+      codecPlayer = nextPlayer;
+      syncedCodec = preferredCodec;
       notices?.attach(nextPlayer.video, route, lifecycle, () => lifecycle === playerLifecycle && player === nextPlayer && playerRoute === routeIdentity()?.key && playerContainer?.isConnected && !["error", "native-fallback", "disabled"].includes(stats.playerState));
       if (isPodSwitch) {
         trustedPodVideoKey = identity.videoKey;
         pendingPodSwitch = null;
       }
-      earlyMask?.release?.();
     } catch (error) {
       if (lifecycle !== playerLifecycle) return;
       recordTakeoverFailure(route, "create", error, true);
-      earlyMask?.release?.();
       restartTimer = setTimeout(startPlayer, 2000);
     }
   }
 
   function restartPlayer(force = false) {
     clearTimeout(restartTimer);
-    if (force && compatibilityReloadTimer) cancelCompatibilityReload(true);
     const identity = routeIdentity();
-    if (!force && player && identity?.key === playerRoute && playerContainer?.isConnected && player.video?.isConnected) {
-      earlyMask?.release?.();
-      return;
-    }
+    if (!force && player && identity?.key === playerRoute && playerContainer?.isConnected && player.video?.isConnected) return;
     routeGeneration += 1;
     routeRequestController?.abort();
     routeRequestController = null;
     startingRoute = "";
     failedRoute = "";
-    if (settings.enabled && identity) earlyMask?.arm?.();
-    else earlyMask?.release?.();
     if (player) stopPlayer(false);
     restartTimer = setTimeout(startPlayer, 50);
   }
@@ -3410,23 +3673,28 @@ const chrome = (() => {
       settings = core.normalizeSettings(event.data.payload);
       settingsLoaded = true;
       notices?.configure(settings);
-      if (!hadLoadedSettings || previous.enabled !== settings.enabled || previous.mode !== settings.mode || previous.concurrency !== settings.concurrency || previous.compatibilityMode !== settings.compatibilityMode) notices?.log("设置已经生效", `使用${settings.mode === "overseas" ? "海外" : "大陆"} CDN，开启 ${settings.concurrency} 条下载线程。\n当前是${settings.compatibilityMode === "off" ? "标准模式" : `兼容模式 ${settings.compatibilityMode.toUpperCase()}`}。`, "success", "", undefined, "settings");
+      const serversChanged = settings.mode === "custom" && previous.customHosts.join(",") !== settings.customHosts.join(",");
+      if (!hadLoadedSettings || previous.enabled !== settings.enabled || previous.mode !== settings.mode || previous.concurrency !== settings.concurrency || serversChanged) {
+        const cdn = settings.mode === "overseas" ? "海外 CDN"
+          : settings.mode !== "custom" ? "大陆 CDN"
+            : settings.customHosts.length ? `自定义的 ${settings.customHosts.length} 个服务器` : "大陆 CDN（自定义里还没选服务器）";
+        notices?.log("设置已经生效", `使用${cdn}，开启 ${settings.concurrency} 条下载线程。`, "success", "", undefined, "settings");
+      }
       stats.mode = settings.mode;
       syncSettingsMenu();
-      if (settings.compatibilityMode === "off") {
-        cancelCompatibilityReload(true);
-      }
       if (!settings.enabled) {
-        cancelCompatibilityReload(true);
         clearTakeoverFailure();
         stats.lastError = "";
         stopPlayer(true);
       }
-      else if (!previous.enabled || previous.mode !== settings.mode || previous.compatibilityMode !== settings.compatibilityMode) {
-        if (hadLoadedSettings && previous.compatibilityMode !== settings.compatibilityMode) cancelCompatibilityReload(true);
+      else if (!previous.enabled) {
         restartPlayer(true);
       }
       else {
+        // The download lists read the CDN mode and servers for every request, so a new choice
+        // applies to the next downloads. Restarting the player used to send the video back to
+        // its start.
+        if (hadLoadedSettings && (previous.mode !== settings.mode || serversChanged) && playerRoute) preconnectCdnNodes(playerRoute);
         player?.applySettings?.(settings);
         startPlayer();
       }
@@ -3435,7 +3703,6 @@ const chrome = (() => {
     } else if (event.data.type === "retry-takeover") {
       clearTimeout(autoRetakeTimer);
       autoRetakeCount = 0;
-      cancelCompatibilityReload(false);
       clearTakeoverFailure();
       stats.lastError = "";
       failedRoute = "";
@@ -3482,7 +3749,10 @@ const chrome = (() => {
   setInterval(() => {
     const identity = routeIdentity();
     if (settingsLoaded && settings.enabled && (!player || playerRoute !== identity?.key || !playerContainer?.isConnected || !player.video?.isConnected)) startPlayer();
-    else syncNativeQuality();
+    else {
+      syncNativeQuality();
+      syncNativeCodec();
+    }
     updateNativeInfoPanel();
     syncSettingsMenu();
   }, 1000);
@@ -3501,11 +3771,11 @@ const chrome = (() => {
         const { timeline = [], ...rest } = debug;
         // Node names and states only: no download address or account data.
         return JSON.stringify({
-          version: stats.version, at: Math.round(performance.now()), settings: { mode: settings.mode, concurrency: settings.concurrency, compatibilityMode: settings.compatibilityMode },
+          version: stats.version, at: Math.round(performance.now()), settings: { mode: settings.mode, customHosts: settings.customHosts.slice(), concurrency: settings.concurrency, codec: nativeCodec() || "default" },
           state: stats.playerState, player: rest, nodes: stats.cdnHosts.map((item) => ({ ...item })), bannedNodes: cdnBans?.hosts?.() || [], timeline
         }, null, 1);
       },
-      version: "0.9.1.5"
+      version: "0.9.2.0"
     })
   });
   publish();
@@ -3822,7 +4092,7 @@ const chrome = (() => {
   "use strict";
 
   const CHANNEL = "__BILI_RANGE_ACCELERATOR_V1__";
-  const VERSION = "0.9.1.5";
+  const VERSION = "0.9.2.0";
   const notices = globalThis.__BTR_NOTIFICATION_VIEW__;
   const ERROR_NOTICE_ID = "__bilibili_thread_ripper_error_notice__";
   const ERROR_NOTICE_STYLE_ID = "__bilibili_thread_ripper_error_notice_style__";
@@ -3831,19 +4101,9 @@ const chrome = (() => {
   const ONBOARDING_STORAGE_KEY = "btrOnboardingRevision";
   const ONBOARDING_REVISION = "native-progressive-mse-v1";
   const THREAD_OPTIONS = Object.freeze([4, 8, 16, 32, 64, 128]);
-  const DEFAULT_DANMAKU = Object.freeze({
-    visible: true,
-    opacity: 0.9,
-    area: "threeQuarter",
-    fontSize: 25,
-    speed: 5,
-    modes: [0, 1, 2],
-    antiOverlap: true,
-    synchronousPlayback: true,
-    mode: 0,
-    color: "#FFFFFF"
-  });
-  const DEFAULTS = { enabled: true, concurrency: 8, volume: 0.7, danmaku: DEFAULT_DANMAKU, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: false, debugCategories: {}, subtitleLanguage: "off", subtitleLastLanguage: "" };
+  const DEFAULTS = { enabled: true, concurrency: 8, mode: "mainland", customHosts: [], debugNotices: false, errorNotices: false, debugCategories: {} };
+  // Settings of the old ArtPlayer version and of the removed compatibility modes.
+  const RETIRED_KEYS = ["statusNotice", "compatibilityMode", "volume", "danmaku", "danmakuFontSize", "subtitleLanguage", "subtitleLastLanguage"];
   let latestSettings = { ...DEFAULTS };
   let latestStats = null;
   let loaded = false;
@@ -3884,12 +4144,6 @@ const chrome = (() => {
       #${ONBOARDING_ID} .btr-onboarding-mode input:focus-visible+.btr-onboarding-mode-body{outline:2px solid #00aeec!important;outline-offset:2px!important}
       #${ONBOARDING_ID} .btr-onboarding-mode-name{display:block!important;margin:0 0 5px!important;font-size:14px!important;line-height:20px!important;font-weight:600!important}
       #${ONBOARDING_ID} .btr-onboarding-mode-note{display:block!important;color:#9499a0!important;font-size:12px!important;line-height:18px!important;font-weight:400!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat-list{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:8px!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat{position:relative!important;display:block!important;cursor:pointer!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input{position:absolute!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat-label{display:flex!important;align-items:center!important;justify-content:center!important;min-height:38px!important;padding:8px!important;border:1px solid #dcdfe3!important;border-radius:6px!important;background:#fff!important;color:#61666d!important;font-size:13px!important;line-height:20px!important;font-weight:500!important;text-align:center!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input:checked+.btr-onboarding-compat-label{border-color:#fb7299!important;background:#fff1f5!important;color:#18191c!important}
-      #${ONBOARDING_ID} .btr-onboarding-compat input:focus-visible+.btr-onboarding-compat-label{outline:2px solid #00aeec!important;outline-offset:2px!important}
       #${ONBOARDING_ID} .btr-onboarding-thread-head{display:flex!important;align-items:center!important;justify-content:space-between!important;margin:0 0 6px!important}
       #${ONBOARDING_ID} .btr-onboarding-thread-value{color:#fb7299!important;font-size:22px!important;line-height:28px!important;font-weight:700!important;font-variant-numeric:tabular-nums!important}
       #${ONBOARDING_ID} input[type="range"]{display:block!important;width:100%!important;height:24px!important;margin:0!important;accent-color:#fb7299!important;cursor:pointer!important}
@@ -3957,31 +4211,6 @@ const chrome = (() => {
     }
     modeFieldset.append(modeLegend, modeList);
 
-    const compatibilityFieldset = document.createElement("fieldset");
-    const compatibilityLegend = document.createElement("legend");
-    compatibilityLegend.textContent = "兼容模式";
-    const compatibilityList = document.createElement("div");
-    compatibilityList.className = "btr-onboarding-compat-list";
-    for (const option of [
-      { value: "off", name: "标准模式" },
-      { value: "a", name: "兼容模式 A" },
-      { value: "b", name: "兼容模式 B" }
-    ]) {
-      const label = document.createElement("label");
-      label.className = "btr-onboarding-compat";
-      const input = document.createElement("input");
-      input.type = "radio";
-      input.name = "btr-onboarding-compatibility";
-      input.value = option.value;
-      input.checked = option.value === latestSettings.compatibilityMode;
-      const text = document.createElement("span");
-      text.className = "btr-onboarding-compat-label";
-      text.textContent = option.name;
-      label.append(input, text);
-      compatibilityList.append(label);
-    }
-    compatibilityFieldset.append(compatibilityLegend, compatibilityList);
-
     const threadFieldset = document.createElement("fieldset");
     const threadHead = document.createElement("div");
     threadHead.className = "btr-onboarding-thread-head";
@@ -4026,13 +4255,11 @@ const chrome = (() => {
     status.setAttribute("aria-live", "polite");
     save.addEventListener("click", () => {
       const mode = panel.querySelector('input[name="btr-onboarding-mode"]:checked')?.value === "overseas" ? "overseas" : "mainland";
-      const compatibilityValue = panel.querySelector('input[name="btr-onboarding-compatibility"]:checked')?.value;
-      const compatibilityMode = ["a", "b"].includes(compatibilityValue) ? compatibilityValue : "off";
       const concurrency = THREAD_OPTIONS[Number(threadRange.value)] || 8;
       save.disabled = true;
       save.textContent = "正在保存…";
-      latestSettings = normalizeStoredSettings({ ...latestSettings, enabled: true, mode, compatibilityMode, concurrency });
-      chrome.storage.sync.set({ enabled: true, mode, compatibilityMode, concurrency }, () => {
+      latestSettings = normalizeStoredSettings({ ...latestSettings, enabled: true, mode, concurrency });
+      chrome.storage.sync.set({ enabled: true, mode, concurrency }, () => {
         if (chrome.runtime.lastError) {
           status.textContent = `保存失败：${chrome.runtime.lastError.message}`;
           save.disabled = false;
@@ -4055,7 +4282,7 @@ const chrome = (() => {
       });
     });
 
-    panel.append(heading, lead, modeFieldset, compatibilityFieldset, threadFieldset, tip, save, status);
+    panel.append(heading, lead, modeFieldset, threadFieldset, tip, save, status);
     overlay.append(panel);
     mount.append(overlay);
     save.focus({ preventScroll: true });
@@ -4070,50 +4297,21 @@ const chrome = (() => {
     });
   }
 
-  function normalizeDanmaku(input, legacyFontSize) {
-    const source = input && typeof input === "object" ? input : {};
-    const allowedAreas = ["quarter", "half", "threeQuarter", "full"];
-    const allowedSpeeds = [1, 2.5, 5, 7.5, 10];
-    const requestedSpeed = Number(source.speed);
-    const requestedModes = Array.isArray(source.modes)
-      ? [...new Set(source.modes.map(Number).filter((value) => [0, 1, 2].includes(value)))]
-      : [0, 1, 2];
-    const requestedColor = String(source.color || "").toUpperCase();
-    return {
-      visible: source.visible !== false,
-      opacity: Math.max(0, Math.min(1, Number.isFinite(Number(source.opacity)) ? Number(source.opacity) : 0.9)),
-      area: allowedAreas.includes(source.area) ? source.area : "threeQuarter",
-      fontSize: Math.max(12, Math.min(64, Math.round(Number(source.fontSize ?? legacyFontSize) || 25))),
-      speed: allowedSpeeds.includes(requestedSpeed) ? requestedSpeed : 5,
-      modes: requestedModes,
-      antiOverlap: source.antiOverlap !== false,
-      synchronousPlayback: source.synchronousPlayback !== false,
-      mode: [0, 1, 2].includes(Number(source.mode)) ? Number(source.mode) : 0,
-      color: /^#[0-9A-F]{6}$/.test(requestedColor) ? requestedColor : "#FFFFFF"
-    };
-  }
-
+  // The page checks each custom server again with the full rules before using it; here it
+  // only has to look like a host name.
   function normalizeStoredSettings(input) {
-    const allowedThreads = [4, 8, 16, 32, 64, 128];
-    const requested = Math.trunc(Number(input?.concurrency));
-    const requestedVolume = Number(input?.volume);
+    const threads = Math.trunc(Number(input?.concurrency));
     return {
       enabled: input?.enabled !== false,
-      concurrency: allowedThreads.includes(requested) ? requested : 8,
-      volume: Number.isFinite(requestedVolume) ? Math.max(0, Math.min(1, requestedVolume)) : 0.7,
-      danmaku: normalizeDanmaku(input?.danmaku, input?.danmakuFontSize),
-      mode: input?.mode === "overseas" ? "overseas" : "mainland",
-      compatibilityMode: ["a", "b"].includes(input?.compatibilityMode) ? input.compatibilityMode : "off",
+      concurrency: THREAD_OPTIONS.includes(threads) ? threads : 8,
+      mode: ["overseas", "custom"].includes(input?.mode) ? input.mode : "mainland",
+      customHosts: (Array.isArray(input?.customHosts) ? input.customHosts : [])
+        .map((host) => String(host).trim().toLowerCase())
+        .filter((host, index, all) => /^[a-z\d](?:[a-z\d.-]{0,251}[a-z\d])?$/.test(host) && all.indexOf(host) === index)
+        .slice(0, 32),
       debugNotices: input?.debugNotices === true,
       errorNotices: input?.errorNotices === true,
-      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false])),
-      subtitleLanguage: /^[\w-]+$/i.test(String(input?.subtitleLanguage || "off"))
-        ? String(input.subtitleLanguage).slice(0, 48)
-        : "off",
-      subtitleLastLanguage: /^[\w-]+$/i.test(String(input?.subtitleLastLanguage || ""))
-        && String(input.subtitleLastLanguage).toLowerCase() !== "off"
-        ? String(input.subtitleLastLanguage).slice(0, 48)
-        : ""
+      debugCategories: Object.fromEntries(["takeover", "playback", "download", "buffer", "settings", "other"].map(key => [key, input?.debugCategories?.[key] !== false]))
     };
   }
 
@@ -4284,26 +4482,11 @@ const chrome = (() => {
   }
 
   chrome.storage.sync.get(null, (stored) => {
-    const migrated = { ...DEFAULTS, ...stored };
-    if (!stored.danmaku && stored.danmakuFontSize !== undefined) {
-      migrated.danmaku = { ...DEFAULT_DANMAKU, fontSize: stored.danmakuFontSize };
-    }
-    latestSettings = normalizeStoredSettings(migrated);
-    if (Object.prototype.hasOwnProperty.call(stored, "statusNotice")) chrome.storage.sync.remove("statusNotice");
-    if (JSON.stringify(stored.debugCategories) !== JSON.stringify(latestSettings.debugCategories) || stored.errorNotices !== latestSettings.errorNotices || stored.debugNotices !== latestSettings.debugNotices || stored.mode !== latestSettings.mode || stored.compatibilityMode !== latestSettings.compatibilityMode || stored.concurrency !== latestSettings.concurrency || stored.volume !== latestSettings.volume || stored.subtitleLanguage !== latestSettings.subtitleLanguage || stored.subtitleLastLanguage !== latestSettings.subtitleLastLanguage || JSON.stringify(stored.danmaku) !== JSON.stringify(latestSettings.danmaku)) {
-      chrome.storage.sync.set({
-        mode: latestSettings.mode,
-        compatibilityMode: latestSettings.compatibilityMode,
-        debugNotices: latestSettings.debugNotices,
-        errorNotices: latestSettings.errorNotices,
-        debugCategories: latestSettings.debugCategories,
-        concurrency: latestSettings.concurrency,
-        volume: latestSettings.volume,
-        subtitleLanguage: latestSettings.subtitleLanguage,
-        subtitleLastLanguage: latestSettings.subtitleLastLanguage,
-        danmaku: latestSettings.danmaku
-      });
-    }
+    latestSettings = normalizeStoredSettings({ ...DEFAULTS, ...stored });
+    const retired = RETIRED_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(stored, key));
+    if (retired.length) chrome.storage.sync.remove(retired);
+    const changed = Object.keys(DEFAULTS).filter((key) => JSON.stringify(stored[key]) !== JSON.stringify(latestSettings[key]));
+    if (changed.length) chrome.storage.sync.set(Object.fromEntries(changed.map((key) => [key, latestSettings[key]])));
     loaded = true;
     notices?.configure(latestSettings);
     syncTakeoverErrorNotice();
@@ -4335,51 +4518,18 @@ const chrome = (() => {
       notices?.logs(event.data.payload);
       return;
     }
-    if (event.data.type === "danmaku-request") {
-      const requestId = String(event.data.requestId || "").slice(0, 100);
-      const cid = Number(event.data.cid);
-      if (!requestId || !Number.isSafeInteger(cid) || cid <= 0) return;
-      chrome.runtime.sendMessage({ type: "fetchDanmakuXml", cid }).then(
-        (payload) => window.postMessage({ channel: CHANNEL, type: "danmaku-response", requestId, payload }, "*"),
-        (error) => window.postMessage({
-          channel: CHANNEL,
-          type: "danmaku-response",
-          requestId,
-          payload: { ok: false, error: String(error?.message || error).slice(0, 180) }
-        }, "*")
-      );
-      return;
-    }
-    if (event.data.type === "subtitle-request") {
-      const requestId = String(event.data.requestId || "").slice(0, 100);
-      const url = String(event.data.url || "").slice(0, 4096);
-      if (!requestId || !url) return;
-      chrome.runtime.sendMessage({ type: "fetchSubtitleText", url }).then(
-        (payload) => window.postMessage({ channel: CHANNEL, type: "subtitle-response", requestId, payload }, "*"),
-        (error) => window.postMessage({
-          channel: CHANNEL,
-          type: "subtitle-response",
-          requestId,
-          payload: { ok: false, error: String(error?.message || error).slice(0, 180) }
-        }, "*")
-      );
+    // The settings panel and the player's gear menu save through here.
+    if (event.data.type === "get-settings") {
+      if (loaded) postSettings();
       return;
     }
     if (event.data.type === "settings-update") {
       const input = event.data.payload;
       if (!input || typeof input !== "object") return;
-      const update = {};
-      if (input.mode === "mainland" || input.mode === "overseas") update.mode = input.mode;
-      if (["off", "a", "b"].includes(input.compatibilityMode)) update.compatibilityMode = input.compatibilityMode;
-      const concurrency = Math.trunc(Number(input.concurrency));
-      if ([4, 8, 16, 32, 64, 128].includes(concurrency)) update.concurrency = concurrency;
-      const volume = Number(input.volume);
-      if (Number.isFinite(volume)) update.volume = Math.max(0, Math.min(1, volume));
-      if (input.danmaku && typeof input.danmaku === "object") update.danmaku = normalizeDanmaku(input.danmaku);
-      if (/^[\w-]+$/i.test(String(input.subtitleLanguage || ""))) update.subtitleLanguage = String(input.subtitleLanguage).slice(0, 48);
-      if (input.subtitleLastLanguage === "") update.subtitleLastLanguage = "";
-      else if (/^[\w-]+$/i.test(String(input.subtitleLastLanguage || "")) && String(input.subtitleLastLanguage).toLowerCase() !== "off") update.subtitleLastLanguage = String(input.subtitleLastLanguage).slice(0, 48);
-      if (Object.keys(update).length) chrome.storage.sync.set(update);
+      const keys = Object.keys(DEFAULTS).filter((key) => Object.prototype.hasOwnProperty.call(input, key));
+      if (!keys.length) return;
+      const next = normalizeStoredSettings({ ...latestSettings, ...Object.fromEntries(keys.map((key) => [key, input[key]])) });
+      chrome.storage.sync.set(Object.fromEntries(keys.map((key) => [key, next[key]])));
       return;
     }
     if (event.data.type !== "stats") return;
@@ -4388,7 +4538,7 @@ const chrome = (() => {
     latestStats = {
       version: String(input.version || ""),
       architecture: String(input.architecture || ""),
-      mode: input.mode === "overseas" ? "overseas" : "mainland",
+      mode: ["overseas", "custom"].includes(input.mode) ? input.mode : "mainland",
       playerState: String(input.playerState || "waiting").slice(0, 32),
       quality: String(input.quality || "").slice(0, 24),
       bufferedAhead: Math.max(0, Number(input.bufferedAhead) || 0),
@@ -4401,7 +4551,7 @@ const chrome = (() => {
       healthyCdns: Math.max(0, Number(input.healthyCdns) || 0),
       blockedCdns: Math.max(0, Number(input.blockedCdns) || 0),
       lastHost: String(input.lastHost || "").slice(0, 120),
-      lastError: String(input.lastError || "").replace(/[\u00b7\u2022\u2027\u2219\u22c5]+/g, "，").slice(0, 180),
+      lastError: String(input.lastError || "").replace(/[·•‧∙⋅]+/g, "，").slice(0, 180),
       takeoverError: normalizeTakeoverError(input.takeoverError),
       cdnHosts: Array.isArray(input.cdnHosts) ? input.cdnHosts.slice(0, 32).map((item) => ({
         host: String(item?.host || "").slice(0, 120),
@@ -4422,206 +4572,11 @@ const chrome = (() => {
     syncTakeoverErrorNotice();
   });
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type !== "getStatus") return false;
-    window.postMessage({ channel: CHANNEL, type: "get-stats" }, "*");
-    sendResponse({ settings: latestSettings, stats: latestStats });
+  // The toolbar icon of the extension. The settings panel runs in the page.
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "openSettings" && window.top === window) window.postMessage({ channel: CHANNEL, type: "open-settings", payload: { toggle: true } }, "*");
     return false;
   });
-})();
-
-/* popup/popup.html, popup/popup.css */
-const POPUP_HTML = "\u003cmain\u003e\n      \u003cheader\u003e\n        \u003cdiv class=\"logo\" aria-hidden=\"true\"\u003eB\u003c/div\u003e\n        \u003ch1\u003e线程撕裂者\u003c/h1\u003e\n        \u003clabel class=\"switch\" title=\"启用或停用\"\u003e\n          \u003cinput id=\"enabled\" type=\"checkbox\"\u003e\n          \u003cspan\u003e\u003c/span\u003e\n        \u003c/label\u003e\n      \u003c/header\u003e\n\n      \u003csection class=\"mode-select\" aria-label=\"CDN 模式\"\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"mode\" value=\"mainland\"\u003e\u003cspan\u003e大陆\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"mode\" value=\"overseas\"\u003e\u003cspan\u003e海外\u003c/span\u003e\u003c/label\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"compatibility-select\" aria-label=\"兼容模式\"\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"off\"\u003e\u003cspan\u003e标准模式\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"a\"\u003e\u003cspan\u003e兼容模式 A\u003c/span\u003e\u003c/label\u003e\n        \u003clabel\u003e\u003cinput type=\"radio\" name=\"compatibility-mode\" value=\"b\"\u003e\u003cspan\u003e兼容模式 B\u003c/span\u003e\u003c/label\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"controls\"\u003e\n        \u003cdiv class=\"control-title\"\u003e\n          \u003clabel for=\"concurrency\"\u003e线程加载数\u003c/label\u003e\n          \u003coutput id=\"thread-value\" for=\"concurrency\"\u003e8\u003c/output\u003e\n        \u003c/div\u003e\n        \u003cdiv class=\"slider\"\u003e\n          \u003cdiv id=\"slider-fill\" class=\"slider-fill\" aria-hidden=\"true\"\u003e\u003c/div\u003e\n          \u003cinput id=\"concurrency\" type=\"range\" min=\"0\" max=\"5\" step=\"1\" value=\"1\" aria-label=\"线程加载数\" aria-valuetext=\"8\"\u003e\n        \u003c/div\u003e\n        \u003cdiv class=\"scale\" aria-hidden=\"true\"\u003e\n          \u003cspan\u003e4\u003c/span\u003e\u003cspan\u003e8\u003c/span\u003e\u003cspan\u003e16\u003c/span\u003e\u003cspan\u003e32\u003c/span\u003e\u003cspan\u003e64\u003c/span\u003e\u003cspan\u003e128\u003c/span\u003e\n        \u003c/div\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"notice-controls\" aria-label=\"提示设置\"\u003e\n        \u003cdiv class=\"notice-row\"\u003e\u003clabel for=\"error-notices\"\u003e显示错误\u003c/label\u003e\u003clabel class=\"switch\"\u003e\u003cinput id=\"error-notices\" type=\"checkbox\" aria-label=\"显示错误\"\u003e\u003cspan\u003e\u003c/span\u003e\u003c/label\u003e\u003c/div\u003e\n        \u003cdiv class=\"notice-row\"\u003e\u003clabel for=\"debug-notices\"\u003eDebug 模式\u003c/label\u003e\u003clabel class=\"switch\"\u003e\u003cinput id=\"debug-notices\" type=\"checkbox\" aria-label=\"Debug 模式\"\u003e\u003cspan\u003e\u003c/span\u003e\u003c/label\u003e\u003c/div\u003e\n        \u003cfieldset id=\"debug-filters\" class=\"debug-filters\" hidden\u003e\n          \u003clegend\u003e显示哪些 Debug 消息\u003c/legend\u003e\n          \u003cdiv class=\"debug-filter-actions\"\u003e\u003cbutton id=\"debug-select-all\" type=\"button\"\u003e全选\u003c/button\u003e\u003cbutton id=\"debug-select-none\" type=\"button\"\u003e全不选\u003c/button\u003e\u003c/div\u003e\n          \u003cdiv class=\"debug-filter-options\"\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"takeover\"\u003e接管与切换\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"playback\"\u003e播放与暂停\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"download\"\u003e下载线程\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"buffer\"\u003e缓冲与跳转\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"settings\"\u003e设置变化\u003c/label\u003e\n            \u003clabel\u003e\u003cinput type=\"checkbox\" data-debug-category=\"other\"\u003e其他日志\u003c/label\u003e\n          \u003c/div\u003e\n        \u003c/fieldset\u003e\n      \u003c/section\u003e\n\n      \u003csection class=\"current-threads\" aria-live=\"polite\"\u003e\n        \u003cspan\u003e目前总线程\u003c/span\u003e\n        \u003cb id=\"active-count\"\u003e0\u003c/b\u003e\n      \u003c/section\u003e\n\n    \u003c/main\u003e";
-const POPUP_CSS = ":root {\n  color-scheme: dark;\n  font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", system-ui, sans-serif;\n  background: #17191f;\n  color: #f5f7fb;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  width: auto;\n  min-width: 280px;\n  margin: 0;\n  background: #17191f;\n}\n\nmain {\n  min-height: 100vh;\n  padding: 18px 16px;\n}\n\nheader {\n  display: grid;\n  grid-template-columns: 42px 1fr auto;\n  align-items: center;\n  gap: 11px;\n  margin-bottom: 22px;\n}\n\n.mode-select {\n  display: grid;\n  grid-template-columns: 1fr 1fr;\n  gap: 1px;\n  margin-bottom: 12px;\n  overflow: hidden;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #30343d;\n}\n\n.mode-select label { position: relative; }\n.mode-select input { position: absolute; opacity: 0; }\n.mode-select span {\n  display: block;\n  padding: 10px 6px;\n  color: #949baa;\n  background: #20232a;\n  font-size: 12px;\n  text-align: center;\n  cursor: pointer;\n}\n.mode-select input:checked + span { color: #fff; background: #fb7299; }\n.mode-select input:focus-visible + span { outline: 2px solid #fff; outline-offset: -3px; }\n\n.compatibility-select {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 1px;\n  margin-bottom: 12px;\n  overflow: hidden;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #30343d;\n}\n\n.compatibility-select label { position: relative; }\n.compatibility-select input { position: absolute; opacity: 0; }\n.compatibility-select span {\n  display: block;\n  padding: 10px 3px;\n  color: #949baa;\n  background: #20232a;\n  font-size: 11px;\n  text-align: center;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.compatibility-select input:checked + span { color: #fff; background: #fb7299; }\n.compatibility-select input:focus-visible + span { outline: 2px solid #fff; outline-offset: -3px; }\n\n.logo {\n  display: grid;\n  place-items: center;\n  width: 42px;\n  height: 42px;\n  border-radius: 8px;\n  color: #fff;\n  font-size: 23px;\n  font-weight: 800;\n  background: #fb7299;\n}\n\nh1 { margin: 0; font-size: 17px; letter-spacing: 0.2px; }\n.switch { position: relative; width: 42px; height: 24px; }\n.switch input { position:absolute; inset:0; z-index:1; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; }\n.switch span {\n  position: absolute;\n  inset: 0;\n  border-radius: 999px;\n  background: #313a4c;\n  cursor: pointer;\n  transition: 160ms ease;\n}\n.switch span::after {\n  content: \"\";\n  position: absolute;\n  top: 3px;\n  left: 3px;\n  width: 18px;\n  height: 18px;\n  border-radius: 50%;\n  background: #fff;\n  transition: 160ms ease;\n}\n.switch input:checked + span { background: #fb7299; }\n.switch input:checked + span::after { transform: translateX(18px); }\n.switch input:focus-visible + span { outline: 2px solid #fff; outline-offset: 3px; }\n.notice-controls { margin-top:12px; padding:14px 16px; border:1px solid #30343d; border-radius:8px; background:#20232a; }\n.notice-row { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#c9ced9; font-size:13px; }\n.notice-row + .notice-row { margin-top:14px; }\n.debug-filters { min-width:0; margin:16px 0 0; padding:12px 0 0; border:0; border-top:1px solid #343943; }\n.debug-filters[hidden] { display:none; }\n.debug-filters legend { padding:0 0 4px; color:#c9ced9; font-size:12px; }\n.debug-filter-actions { display:flex; gap:8px; margin-bottom:12px; }\n.debug-filter-actions button { padding:4px 8px; border:1px solid #444b57; border-radius:4px; background:#292d35; color:#d9dee8; font:inherit; font-size:11px; cursor:pointer; }\n.debug-filter-actions button:hover { border-color:#fb7299; }\n.debug-filter-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 8px; }\n.debug-filter-options label { display:flex; align-items:center; gap:7px; color:#c9ced9; font-size:12px; cursor:pointer; }\n.debug-filter-options input { flex:none; width:15px; height:15px; margin:0; accent-color:#fb7299; cursor:pointer; }\n.debug-filter-actions button:focus-visible,.debug-filter-options input:focus-visible { outline:2px solid #fff; outline-offset:3px; }\n\n.controls {\n  padding: 16px;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #20232a;\n}\n\n.control-title {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-bottom: 14px;\n}\n\n.control-title label {\n  color: #c9ced9;\n  font-size: 13px;\n}\n\noutput {\n  min-width: 42px;\n  padding: 4px 8px;\n  border-radius: 5px;\n  color: #fff;\n  background: #fb7299;\n  font-size: 13px;\n  font-weight: 700;\n  text-align: center;\n}\n\n.slider {\n  position: relative;\n  width: 100%;\n  height: 18px;\n  border-radius: 9px;\n  background: #3a3e47;\n}\n\n.slider-fill {\n  position: absolute;\n  top: 0;\n  bottom: 0;\n  left: 0;\n  width: 60%;\n  border-radius: 9px;\n  background: #fb7299;\n  pointer-events: none;\n}\n\ninput[type=\"range\"] {\n  position: absolute;\n  inset: 0;\n  width: 100%;\n  height: 18px;\n  margin: 0;\n  appearance: none;\n  -webkit-appearance: none;\n  border: 0;\n  outline: 0;\n  background: transparent;\n  cursor: pointer;\n}\n\ninput[type=\"range\"]::-webkit-slider-runnable-track {\n  height: 18px;\n  background: transparent;\n}\n\ninput[type=\"range\"]::-webkit-slider-thumb {\n  width: 24px;\n  height: 24px;\n  margin-top: -3px;\n  appearance: none;\n  -webkit-appearance: none;\n  border: 2px solid #ffffff;\n  border-radius: 50%;\n  background: #ffffff;\n}\n\ninput[type=\"range\"]:focus-visible::-webkit-slider-thumb {\n  border-color: #fb7299;\n}\n\n.scale {\n  display: flex;\n  justify-content: space-between;\n  margin-top: 5px;\n  color: #7f8797;\n  font-size: 10px;\n}\n\n.scale span {\n  width: 24px;\n  text-align: center;\n}\n\n.scale span:first-child { text-align: left; }\n.scale span:last-child { text-align: right; }\n\n.current-threads {\n  margin-top: 12px;\n  padding: 16px;\n  border: 1px solid #30343d;\n  border-radius: 8px;\n  background: #20232a;\n}\n\n.current-threads {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  color: #c9ced9;\n  font-size: 13px;\n}\n\n.current-threads b {\n  color: #ffffff;\n  font-size: 20px;\n  font-variant-numeric: tabular-nums;\n}";
-
-/* popup/popup.js */
-function runPopup(document, chrome, window) {
-"use strict";
-
-const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128];
-const enabled = document.getElementById("enabled");
-const debugNotices = document.getElementById("debug-notices");
-const errorNotices = document.getElementById("error-notices");
-const debugFilters = document.getElementById("debug-filters");
-const debugCategoryInputs = [...document.querySelectorAll("[data-debug-category]")];
-const concurrency = document.getElementById("concurrency");
-const threadValue = document.getElementById("thread-value");
-const sliderFill = document.getElementById("slider-fill");
-const activeCount = document.getElementById("active-count");
-let timer = null;
-
-async function refresh() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有活动标签页");
-    const response = await chrome.tabs.sendMessage(tab.id, { type: "getStatus" });
-    activeCount.textContent = String(Math.max(0, Number(response?.stats?.activeThreads) || 0));
-  } catch (_error) {
-    activeCount.textContent = "0";
-  }
-}
-
-function setSlider(threads) {
-  const index = THREAD_OPTIONS.indexOf(Number(threads));
-  const safe = index < 0 ? 1 : index;
-  concurrency.value = String(safe);
-  threadValue.value = String(THREAD_OPTIONS[safe]);
-  concurrency.setAttribute("aria-valuetext", String(THREAD_OPTIONS[safe]));
-  sliderFill.style.width = `${safe / (THREAD_OPTIONS.length - 1) * 100}%`;
-}
-
-async function init() {
-  const stored = await chrome.storage.sync.get({ enabled: true, concurrency: 8, mode: "mainland", compatibilityMode: "off", debugNotices: false, errorNotices: false, debugCategories: {} });
-  enabled.checked = stored.enabled !== false;
-  debugNotices.checked = stored.debugNotices === true;
-  debugFilters.hidden = !debugNotices.checked;
-  debugNotices.addEventListener("change", () => {
-    debugFilters.hidden = !debugNotices.checked;
-    chrome.storage.sync.set({ debugNotices: debugNotices.checked });
-  });
-  for (const input of debugCategoryInputs) input.checked = stored.debugCategories?.[input.dataset.debugCategory] !== false;
-  const saveDebugCategories = () => chrome.storage.sync.set({ debugCategories: Object.fromEntries(debugCategoryInputs.map(input => [input.dataset.debugCategory, input.checked])) });
-  for (const input of debugCategoryInputs) input.addEventListener("change", saveDebugCategories);
-  document.getElementById("debug-select-all").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = true; saveDebugCategories(); });
-  document.getElementById("debug-select-none").addEventListener("click", () => { for (const input of debugCategoryInputs) input.checked = false; saveDebugCategories(); });
-  errorNotices.checked = stored.errorNotices === true;
-  errorNotices.addEventListener("change", () => chrome.storage.sync.set({ errorNotices: errorNotices.checked }));
-  setSlider(stored.concurrency);
-  const chosen = document.querySelector(`input[name="mode"][value="${stored.mode === "overseas" ? "overseas" : "mainland"}"]`);
-  const compatibilityValue = ["off", "a", "b"].includes(stored.compatibilityMode) ? stored.compatibilityMode : "off";
-  const compatibilityChosen = document.querySelector(`input[name="compatibility-mode"][value="${compatibilityValue}"]`);
-  chosen.checked = true;
-  compatibilityChosen.checked = true;
-  await chrome.storage.sync.set({ enabled: enabled.checked, concurrency: THREAD_OPTIONS[Number(concurrency.value)], mode: chosen.value, compatibilityMode: compatibilityChosen.value });
-  enabled.addEventListener("change", () => chrome.storage.sync.set({ enabled: enabled.checked }));
-  concurrency.addEventListener("input", () => {
-    const threads = THREAD_OPTIONS[Number(concurrency.value)];
-    setSlider(threads);
-    chrome.storage.sync.set({ concurrency: threads });
-  });
-  for (const radio of document.querySelectorAll('input[name="mode"]')) {
-    radio.addEventListener("change", () => { if (radio.checked) chrome.storage.sync.set({ mode: radio.value }); });
-  }
-  for (const radio of document.querySelectorAll('input[name="compatibility-mode"]')) {
-    radio.addEventListener("change", () => { if (radio.checked) chrome.storage.sync.set({ compatibilityMode: radio.value }); });
-  }
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "sync") return;
-    if (changes.debugNotices) {
-      debugNotices.checked = changes.debugNotices.newValue === true;
-      debugFilters.hidden = !debugNotices.checked;
-    }
-    if (changes.debugCategories) for (const input of debugCategoryInputs) input.checked = changes.debugCategories.newValue?.[input.dataset.debugCategory] !== false;
-    if (changes.errorNotices) errorNotices.checked = changes.errorNotices.newValue === true;
-    if (changes.enabled) enabled.checked = changes.enabled.newValue !== false;
-    if (changes.concurrency) setSlider(changes.concurrency.newValue);
-    if (changes.mode) {
-      const radio = document.querySelector(`input[name="mode"][value="${changes.mode.newValue === "overseas" ? "overseas" : "mainland"}"]`);
-      if (radio) radio.checked = true;
-    }
-    if (changes.compatibilityMode) {
-      const next = ["off", "a", "b"].includes(changes.compatibilityMode.newValue) ? changes.compatibilityMode.newValue : "off";
-      const radio = document.querySelector(`input[name="compatibility-mode"][value="${next}"]`);
-      if (radio) radio.checked = true;
-    }
-  });
-  await refresh();
-  timer = setInterval(refresh, 400);
-}
-
-init();
-window.addEventListener("unload", () => clearInterval(timer));
-}
-
-/* user_scripts/adapter/settings-panel.js */
-// The extension's sidebar page (popup/popup.html, popup.css, popup.js), shown inside the
-// bilibili page. The userscript manager's menu opens it; POPUP_HTML, POPUP_CSS and
-// runPopup are filled in from the popup folder when the userscript is built.
-(function installSettingsPanel() {
-  "use strict";
-
-  const HOST_ID = "__bilibili_thread_ripper_userscript_settings__";
-  const DIALOG_ID = "__bilibili_thread_ripper_userscript_dialog__";
-  const PANEL_STYLE = `
-    .btr-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); }
-    .btr-popup { position: fixed; top: 72px; right: 24px; width: 320px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow: auto; border: 1px solid #30343d; border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .45); }
-    .btr-popup main { min-height: 0; }
-    .btr-close { position: sticky; bottom: 12px; display: block; width: calc(100% - 32px); margin: 0 16px 16px; padding: 8px; border: 1px solid #444b57; border-radius: 6px; background: #292d35; color: #d9dee8; font: inherit; font-size: 13px; cursor: pointer; box-shadow: 0 -6px 12px #17191f; }
-    .btr-close:hover { border-color: #fb7299; }
-    .btr-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-  `;
-  let current = null;
-
-  function open() {
-    if (current) return;
-    // A modal <dialog> sits in the browser's top layer and is the only interactive part of
-    // the page while it is open. A plain fixed layer can end up under the page's own
-    // top-layer elements, or inside a part of the page made inert, and then clicks on it
-    // land on whatever is beneath (issue #8).
-    const dialog = document.createElement("dialog");
-    dialog.id = DIALOG_ID;
-    dialog.style.cssText = "all:initial!important;display:block!important;position:fixed!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;overflow:visible!important;z-index:2147483646!important;";
-    const dialogStyle = document.createElement("style");
-    dialogStyle.textContent = `#${DIALOG_ID}::backdrop{background:transparent}`;
-    const host = document.createElement("div");
-    host.id = HOST_ID;
-    host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;";
-    dialog.append(dialogStyle, host);
-    const shadow = host.attachShadow({ mode: "open" });
-    const style = document.createElement("style");
-    // The sidebar styles its whole page; here the same rules apply to the floating panel.
-    style.textContent = POPUP_CSS.replace(/^:root\s*\{/m, ".btr-popup {").replace(/^body\s*\{/m, ".btr-popup {") + PANEL_STYLE;
-    const backdrop = document.createElement("div");
-    backdrop.className = "btr-backdrop";
-    const panel = document.createElement("div");
-    panel.className = "btr-popup";
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-label", "线程撕裂者设置");
-    panel.tabIndex = -1;
-    panel.innerHTML = POPUP_HTML;
-    const closeButton = document.createElement("button");
-    closeButton.type = "button";
-    closeButton.className = "btr-close";
-    closeButton.textContent = "关闭";
-    panel.append(closeButton);
-    shadow.append(style, backdrop, panel);
-
-    // popup.js runs unchanged: its document is this panel, its tab is this page.
-    const storageListeners = [], unloadListeners = [];
-    const pageChrome = {
-      storage: {
-        sync: chrome.storage.sync,
-        onChanged: { addListener(listener) { storageListeners.push(listener); chrome.storage.onChanged.addListener(listener); } }
-      },
-      tabs: {
-        query: () => Promise.resolve([{ id: 1 }]),
-        sendMessage: (_tabId, message) => chrome.runtime.dispatch(message)
-      }
-    };
-    const pageWindow = { addEventListener(type, listener) { if (type === "unload") unloadListeners.push(listener); } };
-    const onKey = (event) => { if (event.key === "Escape") close(); };
-    const close = () => {
-      if (current?.host !== host) return;
-      current = null;
-      for (const listener of unloadListeners) listener();
-      for (const listener of storageListeners) chrome.storage.onChanged.removeListener(listener);
-      document.removeEventListener("keydown", onKey, true);
-      dialog.remove();
-    };
-    current = { host, close };
-    backdrop.addEventListener("click", close);
-    closeButton.addEventListener("click", close);
-    document.addEventListener("keydown", onKey, true);
-    // Esc on a modal dialog closes it natively; clean up the same way as the button.
-    dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
-    (document.body || document.documentElement).append(dialog);
-    try { dialog.showModal(); }
-    catch (_error) { dialog.setAttribute("open", ""); }
-    runPopup(shadow, pageChrome, pageWindow);
-    panel.focus();
-  }
-
-  document.addEventListener("btr-userscript-open-settings", () => (current ? current.close() : open()));
 })();
 }
 
