@@ -38,6 +38,7 @@
         "src/sidx.js",
         "src/idm-downloader.js",
         "src/native-mse-player.js",
+        "src/native-range-transport.js",
         "src/runtime-notices.js",
         "src/settings-panel.js",
         "src/page-hook.js"
