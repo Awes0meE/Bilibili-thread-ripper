@@ -157,6 +157,24 @@ test("a refused address is dropped instead of the nodes it was tried on",()=>{
   assert.equal(bans.allows(akamaiUrl("cosovbv")),true);assert.equal(bans.allows(at(lacking,"akam")),true);
 });
 
+test("a node that delivers one address keeps being used after refusing another that other nodes serve",()=>{
+  const {cdn}=load();
+  const banned=[];
+  const bans=cdn.createBanList({onBan:(host,_count,_error,kind)=>banned.push(kind)});
+  const mirror="upos-sz-mirroraliov.bilivideo.com";
+  const at=(host,os)=>akamaiUrl(os).replace(AKAMAI,host);
+  // The mirror serves both addresses, akamaized.net only one of them.
+  bans.success(at(mirror,"cosovbv"));bans.success(at(mirror,"akam"));bans.success(akamaiUrl("akam"));
+  bans.record(akamaiUrl("cosovbv"),0,refused);bans.record(akamaiUrl("cosovbv"),0,refused);
+  assert.equal(bans.allows(akamaiUrl("cosovbv")),false,"that address is not asked of that node again");
+  assert.equal(bans.allows(akamaiUrl("akam")),true,"the node keeps its working address");
+  assert.equal(bans.allows(at(mirror,"cosovbv")),true,"the address stays in use where it works");
+  assert.deepEqual(Array.from(bans.hosts()),[]);assert.deepEqual(banned,["address"]);
+  const resolver=cdn.createResolver({baseUrl:akamaiUrl("cosovbv"),backupUrl:[akamaiUrl("akam")]},()=> "overseas",bans);
+  assert.ok(Array.from(resolver.urls()).includes(akamaiUrl("akam")));assert.ok(!Array.from(resolver.urls()).includes(akamaiUrl("cosovbv")));
+  assert.ok(Array.from(resolver.status()).every(item=>item.state!=="banned"));
+});
+
 test("an akamaized.net-only video downloads in mainland mode and stops asking for the refused address",{timeout:60000},async()=>{
   const {cdn,idm}=load();
   const asked={cosovbv:0,akam:0};

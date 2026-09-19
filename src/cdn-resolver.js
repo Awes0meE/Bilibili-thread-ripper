@@ -117,8 +117,11 @@
       const strikes = new Map();
       for (const [key, count] of emptyReplies) {
         const [node, address, refused] = key.split("\n");
-        const blamed = !refused || goodAddresses.has(address) ? `node:${node}`
-          : goodNodes.has(node) ? `address:${address}` : "";
+        // A node that serves other addresses and refuses one that other nodes serve loses only
+        // that pair; it is often the fastest node for the addresses it does serve.
+        const blamed = !refused ? `node:${node}`
+          : goodNodes.has(node) ? (goodAddresses.has(address) ? `pair:${node} ${address}` : `address:${address}`)
+            : goodAddresses.has(address) ? `node:${node}` : "";
         if (blamed) strikes.set(blamed, (strikes.get(blamed) || 0) + count);
       }
       banned = new Set([...strikes].filter(([, count]) => count >= limit).map(([key]) => key));
@@ -151,7 +154,7 @@
         goodAddresses.add(address);
         judge(url, null);
       },
-      allows: (url) => !banned.has(`node:${hostOf(url)}`) && !banned.has(`address:${addressOf(url)}`),
+      allows: (url) => !banned.has(`node:${hostOf(url)}`) && !banned.has(`address:${addressOf(url)}`) && !banned.has(`pair:${hostOf(url)} ${addressOf(url)}`),
       allowsNode: (url) => !banned.has(`node:${hostOf(url)}`),
       allowsAddress: (url) => !banned.has(`address:${addressOf(url)}`),
       hosts: () => [...banned].filter((key) => key.startsWith("node:")).map((key) => key.slice(5)),
