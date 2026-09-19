@@ -2004,9 +2004,11 @@ const chrome = (() => {
     const initialTime = hasInitialTime
       ? Math.max(0, Number(options.initialTime))
       : original.currentTime;
+    // A video that has not started yet only starts by itself when the player's "自动开播" is on
+    // (issue #13); the page passes that setting as options.autoplay.
     const initialResume = options.initialResume !== undefined
       ? Boolean(options.initialResume)
-      : !original.wasPaused || original.currentTime < 1;
+      : !original.wasPaused || (original.currentTime < 1 && options.autoplay !== false);
     startSession(selectedVideo, {
       // The native player may already have rendered its first frames before the
       // accelerated MediaSource is ready. Preserve that exact position: forcing
@@ -3032,8 +3034,24 @@ const chrome = (() => {
     }, 120);
   }
 
+  // Stopping our player pauses the video. When the next takeover follows (another video in
+  // the page, a retake), it goes on playing only if it was playing here (issue #13).
+  let resumeHint = null;
+  function takeResumeHint() {
+    const hint = resumeHint;
+    resumeHint = null;
+    return Boolean(hint?.playing && Date.now() - hint.at < 15000);
+  }
+
+  // The player's own "自动开播" switch. Unknown counts as on, as before.
+  function nativeAutoplay() {
+    try { return JSON.parse(root.localStorage.getItem("bpx_player_profile") || "{}")?.media?.autoplay !== false; }
+    catch (_error) { return true; }
+  }
+
   function stopPlayer(resumeNative = true) {
     const current = player;
+    if (current && !resumeNative) resumeHint = { playing: Boolean(current.video && !current.video.paused), at: Date.now() };
     notices?.detach(resumeNative ? "已停止加速，交回 B 站原来的连接" : "已停止接管上一个视频");
     playerLifecycle += 1;
     player = null;
@@ -3258,6 +3276,7 @@ const chrome = (() => {
       cdnBanRoute = route;
     }
     const preferredQuality = nativeQuality();
+    const resumeAfterStop = takeResumeHint();
     try {
       const nextPlayer = playerFactory.createNativePlayer({
         container,
@@ -3268,7 +3287,8 @@ const chrome = (() => {
         // arrives, so carrying that value across would clamp short videos to
         // their final frame and make the switch look frozen.
         initialTime: isPodSwitch ? 0 : undefined,
-        initialResume: isPodSwitch ? pendingPodSwitch.resume : undefined,
+        initialResume: isPodSwitch ? pendingPodSwitch.resume : resumeAfterStop ? true : undefined,
+        autoplay: nativeAutoplay(),
         getSettings: () => settings,
         nativeFetch,
         poster: String(root.__INITIAL_STATE__?.videoData?.pic || ""),

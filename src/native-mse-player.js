@@ -786,9 +786,11 @@
     const initialTime = hasInitialTime
       ? Math.max(0, Number(options.initialTime))
       : original.currentTime;
+    // A video that has not started yet only starts by itself when the player's "自动开播" is on
+    // (issue #13); the page passes that setting as options.autoplay.
     const initialResume = options.initialResume !== undefined
       ? Boolean(options.initialResume)
-      : !original.wasPaused || original.currentTime < 1;
+      : !original.wasPaused || (original.currentTime < 1 && options.autoplay !== false);
     startSession(selectedVideo, {
       // The native player may already have rendered its first frames before the
       // accelerated MediaSource is ready. Preserve that exact position: forcing
