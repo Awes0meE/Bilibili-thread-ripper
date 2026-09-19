@@ -30,8 +30,9 @@
   // Restarting the takeover for the same video keeps the list.
   let cdnBanRoute = "";
   const cdnBans = root.__BILI_CDN_RESOLVER_FACTORY__?.createBanList({
-    onBan(host) {
-      notices?.log("已停用这个 CDN 节点", `${host} 两次没有返回任何数据，这个视频接下来不再使用它。`, "error", "", cdnBanRoute, "download");
+    onBan(host, _count, _error, kind) {
+      if (kind === "address") notices?.log("已停用一个下载地址", "B 站给的一个下载地址一直被服务器拒绝，这个视频接下来改用其他地址。", "info", "", cdnBanRoute, "download");
+      else notices?.log("已停用这个 CDN 节点", `${host} 两次没有返回任何数据，这个视频接下来不再使用它。`, "error", "", cdnBanRoute, "download");
     }
   }) || null;
   let playerContainer = null;
@@ -55,6 +56,10 @@
   let takeoverFailureCount = 0;
   let takeoverFailureStartedAt = 0;
   let takeoverErrorSequence = 1;
+  let autoRetakeTimer = null;
+  let autoRetakeRoute = "";
+  let autoRetakeCount = 0;
+  let autoRetakeAt = 0;
   let compatibilityReloadTimer = null;
   let compatibilityReloadRoute = "";
   let compatibilityReloadTicket = 0;
@@ -123,6 +128,30 @@
     }
     publish();
     scheduleCompatibilityFailureReload(route);
+  }
+
+  // A failed download used to leave the video on Bilibili's own connection until the page
+  // changed. Most such failures are one slow CDN reply, so the takeover is tried again a few
+  // times with a growing pause. The compatibility modes reload the page instead.
+  function scheduleAutoRetake(route) {
+    if (settings.compatibilityMode !== "off") return;
+    const now = Date.now();
+    if (autoRetakeRoute !== route || now - autoRetakeAt > 120000) {
+      autoRetakeRoute = route;
+      autoRetakeCount = 0;
+    }
+    if (autoRetakeCount >= 3) return;
+    autoRetakeCount += 1;
+    autoRetakeAt = now;
+    const attempt = autoRetakeCount;
+    clearTimeout(autoRetakeTimer);
+    autoRetakeTimer = setTimeout(() => {
+      autoRetakeTimer = null;
+      if (!settings.enabled || player || failedRoute !== route || routeIdentity()?.key !== route) return;
+      notices?.log("正在自动重新接管", `刚才的下载出了问题，现在重新接管这个视频（第 ${attempt} 次）。`, "info", "", route, "takeover");
+      failedRoute = "";
+      restartPlayer(true);
+    }, 4000 * (2 ** (attempt - 1)));
   }
 
   function readCompatibilityReloadState() {
@@ -1064,6 +1093,7 @@
               earlyMask?.release?.();
               stats.playerState = "native-fallback";
               publish();
+              scheduleAutoRetake(route);
             }
           }, 3500);
         },
@@ -1142,6 +1172,8 @@
     } else if (event.data.type === "get-stats") {
       publish();
     } else if (event.data.type === "retry-takeover") {
+      clearTimeout(autoRetakeTimer);
+      autoRetakeCount = 0;
       cancelCompatibilityReload(false);
       clearTakeoverFailure();
       stats.lastError = "";
