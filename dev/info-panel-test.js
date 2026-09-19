@@ -100,7 +100,7 @@
       active,
       handedBack,
       checks: {
-        playerType: active["Player Type"] === "线程撕裂者 0.9.1.4 接管",
+        playerType: active["Player Type"] === "线程撕裂者 0.9.1.5 接管",
         mime: active["Mime Type"].startsWith('video/mp4; codecs="av01'),
         dataRate: active["Video DataRate"] === "382 Kbps [AV1]" && active["Audio DataRate"] === "111 Kbps",
         segments: active.Segments === "5 / 80",

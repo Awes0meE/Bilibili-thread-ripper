@@ -67,7 +67,7 @@
         settingOnIsPassed: settingOn?.autoplay === true
       }
     };
-    output.pass = Object.values(output.checks).every(Boolean) && root.__biliThreadRipperDebug?.version === "0.9.1.4";
+    output.pass = Object.values(output.checks).every(Boolean) && root.__biliThreadRipperDebug?.version === "0.9.1.5";
     result.textContent = JSON.stringify(output);
     result.dataset.pass = String(output.pass);
   })();

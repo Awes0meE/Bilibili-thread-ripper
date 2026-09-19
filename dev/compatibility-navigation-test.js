@@ -78,7 +78,7 @@
       playerState: stats.playerState || "",
       version: stats.version || ""
     };
-    output.pass = output.version === "0.9.1.4"
+    output.pass = output.version === "0.9.1.5"
       && output.loadCount === 1
       && output.failedFirstRequest
       && output.switched
