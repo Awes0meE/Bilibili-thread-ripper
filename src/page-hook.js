@@ -389,7 +389,9 @@
       });
       stats.lastHost = host;
       if (host) lastHostByKind[event.kind === "audio" ? "audio" : "video"] = host;
-      publish();
+      // One segment starts and ends dozens of transfers within the same moment. Publishing
+      // each of them at once copied the whole thread list to the side panel every time.
+      schedulePublish();
       return id;
     }
     const item = transfers.get(Number(event?.id));
@@ -419,13 +421,13 @@
     } else {
       if (event.phase === "cancel") {
         transfers.delete(item.id);
-        publish();
+        schedulePublish();
         return event.id;
       }
       item.state = event.phase === "done" ? "done" : "error";
       item.finalBps = event.phase === "done" ? item.loaded * 1000 / Math.max(1, now - item.startedAt) : 0;
       item.expiresAt = now + 3500;
-      publish();
+      schedulePublish();
     }
     return event.id;
   }
@@ -599,6 +601,13 @@
         }
       });
     } else {
+      // Bilibili's own request answered first, so ours for the same video is no longer needed.
+      // Waiting for it delayed the takeover by two more round trips to the API.
+      if (startingRoute === identity.key) {
+        routeRequestController?.abort();
+        routeRequestController = null;
+        startingRoute = "";
+      }
       clearTimeout(restartTimer);
       restartTimer = setTimeout(startPlayer, 0);
     }
@@ -684,6 +693,30 @@
       document.querySelector(".bilibili-player")
     ].filter(Boolean);
     return candidates.find((node) => node.querySelector("video") && node.clientWidth > 200) || null;
+  }
+
+  // The first request to a node otherwise pays for its TLS handshake, which takes over a second
+  // on the distant ones. The downloads are sent without cookies and the browser only reuses a
+  // connection opened the same way, hence crossOrigin. Asked again for every video, because
+  // idle connections are closed after a while.
+  let preconnectKey = "";
+  function preconnectCdnNodes(route) {
+    const key = `${settings.mode}:${route}`;
+    if (preconnectKey === key) return;
+    const factory = root.__BILI_CDN_RESOLVER_FACTORY__;
+    const hosts = settings.mode === "overseas" ? factory?.OVERSEAS_HOSTS : factory?.MAINLAND_HOSTS;
+    const parent = document.head || document.documentElement;
+    if (!Array.isArray(hosts) || !parent) return;
+    preconnectKey = key;
+    for (const link of document.querySelectorAll("link[data-btr-preconnect]")) link.remove();
+    for (const host of hosts) {
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = `https://${host}`;
+      link.crossOrigin = "anonymous";
+      link.dataset.btrPreconnect = "";
+      parent.append(link);
+    }
   }
 
   function settingGroup(title, name, values, selected) {
@@ -954,6 +987,7 @@
       }
     }
     const route = identity.key;
+    preconnectCdnNodes(route);
     if (takeoverFailureRoute && takeoverFailureRoute !== route) {
       clearTakeoverFailure();
       stats.lastError = "";
