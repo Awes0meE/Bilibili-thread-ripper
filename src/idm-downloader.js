@@ -28,6 +28,7 @@
     drain() {
       while (this.active < this.limit && this.queue.length) {
         const entry = this.queue.shift();
+        entry.signal?.removeEventListener("abort", entry.cancel);
         if (entry.signal?.aborted) {
           entry.reject(abortError(entry.signal.reason));
           continue;
@@ -53,6 +54,14 @@
           priority: Number(priority) || 0,
           sequence: this.sequence++
         };
+        entry.cancel = () => {
+          const index = this.queue.indexOf(entry);
+          if (index < 0) return;
+          this.queue.splice(index, 1);
+          signal.removeEventListener("abort", entry.cancel);
+          reject(abortError(signal.reason));
+        };
+        signal?.addEventListener("abort", entry.cancel, { once: true });
         this.queue.push(entry);
         this.queue.sort((a, b) => b.priority - a.priority || a.sequence - b.sequence);
         this.drain();
@@ -74,6 +83,11 @@
         return bytes;
       }
       const reader = response.body.getReader();
+      // Do not rely on fetch implementations to unblock read() after abort. A
+      // pending reader must release its concurrency slot before a quality change.
+      const cancelReader = () => { reader.cancel(controller.signal.reason).catch(() => {}); };
+      controller.signal.addEventListener("abort", cancelReader, { once: true });
+      if (controller.signal.aborted) cancelReader();
       const chunks = [];
       let total = 0;
       let stallTimer = null;
@@ -85,6 +99,7 @@
       try {
         while (true) {
           const { done, value } = await reader.read();
+          if (controller.signal.aborted) throw abortError(controller.signal.reason);
           if (done) break;
           armStall();
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
@@ -95,6 +110,7 @@
         }
       } finally {
         clearTimeout(stallTimer);
+        controller.signal.removeEventListener("abort", cancelReader);
         reader.releaseLock?.();
       }
       const bytes = new Uint8Array(total);
@@ -150,6 +166,9 @@
       } finally {
         clearTimeout(firstByteTimer);
         clearTimeout(totalTimer);
+        // Invalid headers can reject before readBody obtains a reader. Stop that
+        // response too, otherwise it keeps downloading after releasing the slot.
+        controller.abort();
         signal?.removeEventListener("abort", cancel);
         release();
       }
@@ -189,7 +208,7 @@
       return candidates;
     }
 
-    async function downloadPiece(piece, resolver, signal, kind, preferredUrls, startupMode = false, priority = 0) {
+    async function downloadPiece(piece, resolver, signal, kind, preferredUrls, startupMode = false, priority = 0, probeLimit = 8) {
       const settings = core.normalizeSettings(getSettings());
       const allowed = (url) => typeof resolver.allows !== "function" || resolver.allows(url);
       const startup = startupMode === true || startupMode === "probe";
@@ -207,7 +226,7 @@
         }
         const candidates = pieceCandidates(piece, resolver, preferredUrls, round);
         const limit = Math.min(8, candidates.length);
-        const batchWidth = probe ? limit : 2;
+        const batchWidth = probe ? Math.min(limit, probeLimit) : 2;
         const tried = new Set();
         while (tried.size < limit) {
           if (signal?.aborted) throw abortError(signal.reason);
@@ -349,7 +368,8 @@
     async function downloadStartupMediaRange(range, resolver, options, settings) {
       const effectiveConcurrency = settings.concurrency;
       semaphore.setLimit(effectiveConcurrency);
-      const candidateUrls = (typeof resolver.rangeCandidates === "function" ? resolver.rangeCandidates() : resolver.urls())
+      const candidateUrls = (options.probeLimit ? resolver.rescueCandidates()
+        : typeof resolver.rangeCandidates === "function" ? resolver.rangeCandidates() : resolver.urls())
         .filter((url, index, all) => all.indexOf(url) === index);
       const headLength = Math.min(range.length, Math.max(64 * 1024, settings.minChunkBytes));
       const head = {
@@ -365,9 +385,10 @@
         options.kind || "media",
         candidateUrls,
         "probe",
-        220
+        220,
+        options.probeLimit || 8
       );
-      await options.onOrderedChunk(headResult.bytes, head);
+      await options.onOrderedChunk(headResult.bytes, head, headResult.total);
       if (head.end >= range.end) {
         options.onStartupScheduled?.();
         return {
@@ -400,7 +421,7 @@
           while (ordered[nextOrderedIndex]) {
             const item = ordered[nextOrderedIndex];
             ordered[nextOrderedIndex] = null;
-            await options.onOrderedChunk(item.bytes, pieces[nextOrderedIndex]);
+            await options.onOrderedChunk(item.bytes, pieces[nextOrderedIndex], item.total);
             nextOrderedIndex += 1;
           }
         });
@@ -475,7 +496,7 @@
           while (ordered[nextOrderedIndex]) {
             const item = ordered[nextOrderedIndex];
             ordered[nextOrderedIndex] = null;
-            await options.onOrderedChunk(item.bytes, pieces[nextOrderedIndex]);
+            await options.onOrderedChunk(item.bytes, pieces[nextOrderedIndex], item.total);
             nextOrderedIndex += 1;
           }
         });

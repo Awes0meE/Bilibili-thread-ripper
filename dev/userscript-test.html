@@ -32,6 +32,7 @@
       }
     };
     Object.defineProperty(window, "__BILI_NATIVE_MSE_PLAYER_FACTORY__", { configurable: false, get: () => factory, set() {} });
+    Object.defineProperty(window, "__BILI_NATIVE_RANGE_PLAYER_FACTORY__", { configurable: false, get: () => factory, set() {} });
     if (sandbox) {
       window.unsafeWindow = { note: "the manager's view of the page" };
       window.GM_registerMenuCommand = (name, callback) => __userscriptTest.menus.push({ name, callback });

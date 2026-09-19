@@ -12,7 +12,7 @@
   if (root[INSTALL_FLAG]) return;
 
   const core = root.__BILI_RANGE_CORE__;
-  const playerFactory = root.__BILI_NATIVE_MSE_PLAYER_FACTORY__;
+  const playerFactory = root.__BILI_NATIVE_RANGE_PLAYER_FACTORY__ || root.__BILI_NATIVE_MSE_PLAYER_FACTORY__;
   const notices = root.__BTR_RUNTIME_NOTICES__;
   if (!core || !playerFactory || typeof root.fetch !== "function") return;
   Object.defineProperty(root, INSTALL_FLAG, { value: true });
@@ -62,7 +62,7 @@
   const transfers = new Map();
   const stats = {
     version: "0.9.2.0",
-    architecture: "bilibili-native-ui-progressive-mse-0.8-core",
+    architecture: root.__BILI_NATIVE_RANGE_PLAYER_FACTORY__ ? "native-player-range-transport" : "bilibili-native-ui-progressive-mse-0.8-core",
     mode: settings.mode,
     playerState: "waiting",
     quality: "",
@@ -466,12 +466,15 @@
     xhrPrototype.send = function (...args) {
       const url = xhrUrls.get(this) || "";
       if (/\/x\/player\/(?:wbi\/)?playurl/i.test(url)) {
-        this.addEventListener("load", () => {
+        const context = xhrContexts.get(this);
+        const observe = () => {
           try {
             const payload = this.responseType === "json" ? this.response : JSON.parse(this.responseText);
-            observePlayinfo(this.responseURL || url, payload, xhrContexts.get(this));
+            observePlayinfo(this.responseURL || url, payload, context);
           } catch (_error) {}
-        }, { once: true });
+        };
+        this.addEventListener("load", observe, { once: true });
+        this.addEventListener("loadend", () => this.removeEventListener("load", observe), { once: true });
       }
       return nativeXhrSend.apply(this, args);
     };
@@ -738,6 +741,7 @@
   }
 
   function syncNativeQuality() {
+    if (player?.nativeTransport) return;
     const wanted = nativeQuality();
     if (!player?.setQuality || (qualityPlayer === player && syncedQuality === wanted)) return;
     const current = player, route = playerRoute, lifecycle = playerLifecycle;
@@ -757,6 +761,7 @@
   }
 
   function syncNativeCodec() {
+    if (player?.nativeTransport) return;
     const wanted = nativeCodec();
     if (!player?.setCodec || (codecPlayer === player && syncedCodec === wanted)) return;
     const current = player, route = playerRoute, lifecycle = playerLifecycle;

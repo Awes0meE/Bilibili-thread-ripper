@@ -239,3 +239,47 @@ test("the custom CDN mode uses only the servers picked in the settings, and only
   hosts=["upos-sz-mirrorbos.bilivideo.com"];
   assert.deepEqual(hostsOf(resolver.urls()),["upos-sz-mirrorbos.bilivideo.com"]);
 });
+
+test("cancelled queued requests and body readers release download slots promptly", {timeout:3000}, async()=>{
+  const {idm}=load();
+  let started=0,canceledReaders=0;
+  const nativeFetch=async(_url,init)=>{
+    started++;
+    const range=/bytes=(\d+)-(\d+)/.exec(init.headers.Range);
+    // Model a fetch implementation whose body does not reject on AbortSignal.
+    return new Response(new ReadableStream({cancel(){canceledReaders++;}}),{
+      status:206,headers:{"content-range":`bytes ${range[1]}-${range[2]}/10000`}
+    });
+  };
+  const url=mediaUrl("upos-sz-mirrorali.bilivideo.com");
+  const resolver={urls:()=>[url],ordered:()=>[url],success(){},failure(){}};
+  const downloader=idm.createDownloader({getSettings:()=>({concurrency:4}),nativeFetch});
+  const blockers=Array.from({length:4},()=>new AbortController());
+  const pending=blockers.map(controller=>downloader.downloadRange({start:0,end:9,length:10},resolver,{signal:controller.signal,parallel:true}).catch(error=>error.name));
+  while(started<4)await new Promise(resolve=>setTimeout(resolve,1));
+  const queued=new AbortController();
+  const queuedResult=downloader.downloadRange({start:10,end:19,length:10},resolver,{signal:queued.signal,parallel:true}).catch(error=>error.name);
+  queued.abort();
+  try{
+    assert.equal(await Promise.race([queuedResult,new Promise(resolve=>setTimeout(()=>resolve("still queued"),80))]),"AbortError");
+  }finally{blockers.forEach(controller=>controller.abort());}
+  assert.deepEqual(await Promise.all(pending),["AbortError","AbortError","AbortError","AbortError"]);
+  assert.equal(canceledReaders,4);
+  assert.equal(started,4,"the canceled queued request never starts");
+});
+
+test("invalid headers abort the unused response before its slot is reused", {timeout:3000}, async()=>{
+  const {idm}=load();
+  const signals=[];
+  const url=mediaUrl("upos-sz-mirrorali.bilivideo.com");
+  const resolver={urls:()=>[url],ordered:()=>[url],success(){},failure(){}};
+  const downloader=idm.createDownloader({getSettings:()=>({concurrency:4}),nativeFetch:async(_url,init)=>{
+    signals.push(init.signal);
+    if(signals.length===1)return new Response(new ReadableStream(),{status:403});
+    assert.equal(signals[0].aborted,true,"the refused response must not keep downloading");
+    return new Response(new Uint8Array(10),{status:206,headers:{"content-range":"bytes 0-9/100"}});
+  }});
+  const result=await downloader.downloadRange({start:0,end:9,length:10},resolver,{parallel:true});
+  assert.equal(result.bytes.byteLength,10);
+  assert.equal(signals.length,2);
+});
